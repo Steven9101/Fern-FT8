@@ -1,12 +1,25 @@
 # Fern-FT8
 
 Fern-FT8 decodes FT8, the weak-signal digital mode of WSJT-X, for
-[FernSDR](https://github.com/Steven9101/WebSDR). It will run as a FernSDR
-decoder module: FernSDR cuts narrow channels out of its bands and streams
-them to the module, which reports what it decodes (FernSDR's
-`docs/MODULES.md`, "Decoders"). This repository holds the decoding engine, a
-library with a command line tool and tests; the module around it is built
-separately.
+[FernSDR](https://github.com/Steven9101/WebSDR), as a FernSDR decoder
+module: FernSDR cuts narrow channels out of its bands and streams them to
+the module, which reports what it decodes (FernSDR's `docs/MODULES.md`,
+"Decoders"). This repository holds the engine, the module around it, a
+command line tool and the tests.
+
+## Using it in FernSDR
+
+On the admin panel's Decoders page, turn on FT8. FernSDR installs this
+module, offers the FT8 frequencies your bands cover, and decodes from then
+on; making the decodes public, or reporting spots, is a switch there. Nothing
+needs a terminal. The package can also be installed by hand:
+
+```
+fernsdr --install-module ft8-0.1.0-linux-x86_64.fernmod /etc/fernsdr/fernsdr.conf
+```
+
+Packages exist for x86-64, aarch64 and armhf (ARMv7 with NEON: every
+Raspberry Pi from the Pi 2 on). Each is one static program of 1 to 2 MB.
 
 It only receives. It follows the FT8 protocol as its authors define it
 (S. Franke K9AN, B. Somerville G4WJS, J. Taylor K1JT, "The FT4 and FT8
@@ -17,11 +30,14 @@ lists what comes from where; `docs/DESIGN.md` explains how it decodes.
 ## Build
 
 A C++17 compiler (g++) and make; nothing else, and the result needs nothing
-but the C++ runtime.
+but the C++ runtime. `make package` also wants python3 and, for ARM, the
+aarch64-linux-gnu or arm-linux-gnueabihf cross compiler.
 
 ```
 make              # build/libfernft8.a and build/fern-ft8
-make test         # 49 tests: protocol vectors, messages, DSP, whole decodes
+make test         # 52 tests: protocol vectors, messages, DSP, whole decodes,
+                  # the module session
+make package ARCH=x86_64          # or aarch64, armhf: dist/ft8-VERSION-linux-ARCH.fernmod
 make test-asan    # the same under AddressSanitizer and UBSan
 make test-cross CROSS_ARCH=aarch64   # or armhf: cross build, run under qemu-user
 make bench        # CPU per busy and per quiet slot, one thread

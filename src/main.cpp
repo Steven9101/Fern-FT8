@@ -442,6 +442,7 @@ int main(int argc, char** argv) {
     const std::string cmd = argv[1];
     // As FernSDR starts it: a decoder session on its descriptors.
     if (cmd == "--fernsdr-module") return fern::ft8::run_module(argc, argv);
+    if (cmd == "--describe") return fern::ft8::describe_module();
     try {
         if (cmd == "decode")
             return cmd_decode(argc - 2, argv + 2);

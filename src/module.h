@@ -13,4 +13,8 @@ namespace fern::ft8 {
 // 3 for a session FernSDR opened wrongly.
 int run_module(int argc, char** argv);
 
+// `fern-ft8 --describe`: what the module is and the settings it takes, as
+// one JSON object on stdout; the package's manifest is built from it.
+int describe_module();
+
 }  // namespace fern::ft8

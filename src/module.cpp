@@ -244,6 +244,15 @@ private:
 
 }  // namespace
 
+int describe_module() {
+    std::printf("{\"api\":2,\"id\":\"ft8\",\"name\":\"Fern-FT8\",\"version\":\"" FERN_FT8_VERSION
+                "\",\"kind\":\"decoder\",\"modes\":[\"ft8\"],\"settings\":[{\"key\":\"depth\","
+                "\"type\":\"number\",\"label\":\"Depth\",\"min\":1,\"max\":3,\"default\":2,"
+                "\"help\":\"How hard each slot is searched: 1 is quickest, 3 finds a few more weak signals "
+                "for about a third more CPU\"}]}\n");
+    return 0;
+}
+
 int run_module(int argc, char** argv) {
     if (argc < 3 || std::string(argv[1]) != "--fernsdr-module" || std::string(argv[2]) != "2") {
         std::fprintf(stderr, "usage: fern-ft8 --fernsdr-module 2 (started by FernSDR)\n");
