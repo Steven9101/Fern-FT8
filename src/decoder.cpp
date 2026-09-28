@@ -365,34 +365,54 @@ float costas_power(const std::vector<cf>& bb, int n0, double df, const cf (*tone
 }
 
 // Soft bits from blocks of `span` data symbols, per half of the message,
-// the last block of a half shorter when 29 does not divide.
+// the last block of a half shorter when 29 does not divide. For each of the
+// 8^len tone sequences of a block the magnitude of the coherent sum; a
+// bit's soft value is the largest magnitude among sequences with that bit
+// 0 less the largest with it 1 ([QEX] section 6). The magnitudes are laid
+// out by the bits the tones carry, so that each bit's two maxima are over
+// alternating runs of the array.
 void block_llrs(const cf (*c)[kToneCount], int span, Llrs& llr) {
+    float m[512];
+    cf pair[64];
     for (int half = 0; half < 2; ++half) {
         for (int first = 0; first < 29; first += span) {
             const int len = std::min(span, 29 - first);
             const int d0 = half * 29 + first;
-            const int combos = 1 << (3 * len);
-            float best0[9], best1[9];
-            for (int i = 0; i < 3 * len; ++i)
-                best0[i] = best1[i] = -1.0f;
-            for (int combo = 0; combo < combos; ++combo) {
-                cf sum(0, 0);
-                int bits = 0;
-                for (int s = 0; s < len; ++s) {
-                    const int tone = (combo >> (3 * (len - 1 - s))) & 7;
-                    sum += c[data_symbol_index(d0 + s)][tone];
-                    bits = (bits << 3) | kToneToBits[tone];
-                }
-                const float m = std::sqrt(std::norm(sum));
-                for (int i = 0; i < 3 * len; ++i) {
-                    const int bit = (bits >> (3 * len - 1 - i)) & 1;
-                    float& slot = bit ? best1[i] : best0[i];
-                    if (m > slot)
-                        slot = m;
+            const int nbits = 3 * len;
+            const int combos = 1 << nbits;
+            const cf* r0 = c[data_symbol_index(d0)];
+            if (len == 1) {
+                for (int b = 0; b < 8; ++b)
+                    m[b] = std::sqrt(std::norm(r0[kBitsToTone[b]]));
+            } else {
+                const cf* r1 = c[data_symbol_index(d0 + 1)];
+                for (int b0 = 0; b0 < 8; ++b0)
+                    for (int b1 = 0; b1 < 8; ++b1)
+                        pair[b0 * 8 + b1] = r0[kBitsToTone[b0]] + r1[kBitsToTone[b1]];
+                if (len == 2) {
+                    for (int j = 0; j < 64; ++j)
+                        m[j] = std::sqrt(std::norm(pair[j]));
+                } else {
+                    const cf* r2 = c[data_symbol_index(d0 + 2)];
+                    cf third[8];
+                    for (int b2 = 0; b2 < 8; ++b2)
+                        third[b2] = r2[kBitsToTone[b2]];
+                    for (int j = 0; j < 64; ++j)
+                        for (int b2 = 0; b2 < 8; ++b2)
+                            m[j * 8 + b2] = std::sqrt(std::norm(pair[j] + third[b2]));
                 }
             }
-            for (int i = 0; i < 3 * len; ++i)
-                llr[size_t(3 * d0 + i)] = best0[i] - best1[i];
+            for (int i = 0; i < nbits; ++i) {
+                const int run = 1 << (nbits - 1 - i);  // bit i is 0 in the first run of each 2*run
+                float best0 = 0, best1 = 0;
+                for (int base = 0; base < combos; base += 2 * run) {
+                    for (int j = 0; j < run; ++j) {
+                        best0 = std::max(best0, m[base + j]);
+                        best1 = std::max(best1, m[base + run + j]);
+                    }
+                }
+                llr[size_t(3 * d0 + i)] = best0 - best1;
+            }
         }
     }
 }
