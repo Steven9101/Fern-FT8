@@ -7,12 +7,14 @@
 #include <cmath>
 #include <complex>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
-#include "channel.h"
+#include "fern_ft8.h"
 #include "gfsk.h"
 #include "message.h"
 #include "simd.h"
@@ -390,4 +392,41 @@ TEST(decodes_do_not_depend_on_the_simd_level) {
         CHECK(runs[0] == runs[2]);
     }
     set_simd_level(saved);
+}
+
+TEST(channels_decode_on_their_own_threads_with_one_hash_table) {
+    // Two bands: on one PJ4/K1ABC calls CQ in full, on the other a station
+    // answers it by hash in the next slot. Each channel runs on its own
+    // thread; the answer resolves through the shared table.
+    const double rate = 8000, slot = 15 * 300;
+    CallsignHashTable hashes;
+    const cvec a = make_baseband({{"CQ PJ4/K1ABC", 1000.0, 0.0, -5}}, rate, 2000, slot - 2.0, 18.4, slot, 20);
+    const cvec b = make_baseband({{"<PJ4/K1ABC> W9XYZ -11", 1500.0, 0.0, -5}}, rate, 2000, slot + 13.0, 18.4,
+                                 slot + 15, 21);
+    std::vector<SlotResult> ra, rb;
+    std::thread ta([&] {
+        Channel ch(config(rate), &hashes);
+        ra = run_to_end(ch, a, rate, slot - 2.0);
+    });
+    ta.join();  // the CQ is heard first, as on the air
+    std::thread tb([&] {
+        Channel ch(config(rate), &hashes);
+        rb = run_to_end(ch, b, rate, slot + 13.0);
+    });
+    // Meanwhile a third channel decodes noise on this thread.
+    Channel quiet(config(rate), &hashes);
+    const auto rq = run_to_end(quiet, make_baseband({}, rate, 2000, slot, 30.0, 0, 22), rate, slot);
+    tb.join();
+    CHECK(find(ra, "CQ PJ4/K1ABC") != nullptr);
+    CHECK(find(rb, "<PJ4/K1ABC> W9XYZ -11") != nullptr);
+    CHECK_EQ(count_decodes(rq), size_t(0));
+}
+
+TEST(samples_that_are_not_numbers_count_as_silence) {
+    const double rate = 8000, slot = 15 * 400;
+    cvec x = make_baseband({{"CQ K1ABC FN42", 1000.0, 0.0, -5}}, rate, 2000, slot - 2.0, 18.4, slot, 23);
+    for (size_t i = 30000; i < 30100; ++i)
+        x[i] = std::complex<float>(std::nanf(""), std::numeric_limits<float>::infinity());
+    Channel ch(config(rate), nullptr);
+    CHECK(find(run_to_end(ch, x, rate, slot - 2.0), "CQ K1ABC FN42") != nullptr);
 }

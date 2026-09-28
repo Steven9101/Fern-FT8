@@ -102,7 +102,13 @@ void Channel::push(const std::complex<float>* samples, size_t count, uint64_t fi
     }
     if (restart)
         anchor(first_index, utc_us);
+    // Samples that are not finite numbers would spread through every FFT of
+    // the slot; they count as silence.
+    const size_t at = hist_.size();
     hist_.insert(hist_.end(), samples, samples + count);
+    for (size_t i = at; i < hist_.size(); ++i)
+        if (!std::isfinite(hist_[i].real()) || !std::isfinite(hist_[i].imag()))
+            hist_[i] = std::complex<float>(0, 0);
     next_index_ = first_index + count;
     produce();
 }
