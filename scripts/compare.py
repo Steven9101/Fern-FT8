@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Compare Fern-FT8's decodes of real recordings with WSJT-X's jt9.
 
-    scripts/compare.py WAVDIR [--depth 2] [--jt9-depth 2] [--rate-test R] [--json OUT]
+    scripts/compare.py WAVDIR [--depth 2] [--jt9-depth 2] [--rate-test R] [--tune SPEC] [--json OUT]
 
 Decodes every 12 kHz WAV under WAVDIR (for example ft8_lib's test/wav) with
 build/fern-ft8 and with `jt9 -8 -d N`, and prints per-file and total counts:
@@ -51,8 +51,10 @@ def cpu_of(cmd, cwd=None):
 
 
 def run_one(args):
-    wav, depth, jt9_depth, rate_test = args
+    wav, depth, jt9_depth, rate_test, tune = args
     cmd = [FERN, "decode", wav, "--depth", str(depth)]
+    if tune:
+        cmd += ["--tune", tune]
     if rate_test:
         cmd += ["--rate-test", str(rate_test)]
     lines, cpu = cpu_of(cmd)
@@ -73,6 +75,7 @@ def main():
     ap.add_argument("--jt9-depth", type=int, default=2)
     ap.add_argument("--rate-test", type=float, default=0)
     ap.add_argument("--json")
+    ap.add_argument("--tune", default="", help="decoder parameters, as fern-ft8 --tune takes them")
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args()
@@ -86,7 +89,7 @@ def main():
     if not have_jt9:
         print("jt9 not found: Fern-FT8 counts only", file=sys.stderr)
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
-        results = list(ex.map(run_one, [(w, a.depth, jd, a.rate_test) for w in wavs]))
+        results = list(ex.map(run_one, [(w, a.depth, jd, a.rate_test, a.tune) for w in wavs]))
     tot = {"files": len(results), "fern": 0, "fern_cpu": 0.0, "jt9": 0, "jt9_ap": 0, "jt9_cpu": 0.0, "both": 0,
            "only_fern": 0, "only_jt9": 0, "only_jt9_nonap": 0}
     for r in results:

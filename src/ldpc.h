@@ -50,8 +50,8 @@ struct OsdOptions {
     int pair_span = 30;
 };
 
-// The codeword nearest to the soft bits among those OSD tries, provided its
-// CRC is right; found is false otherwise.
+// The codeword nearest to the soft bits among those OSD tries whose CRC is
+// right; found is false when none is.
 OsdResult osd_decode(const Llrs& llr, const OsdOptions& options);
 
 // Bits where cw disagrees with the hard decisions of llr.

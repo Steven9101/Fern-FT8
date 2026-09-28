@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "fft.h"
@@ -49,23 +50,6 @@ constexpr double kNominalStart = kSlotLeadSeconds + kStartSeconds;
 constexpr int kLastStartFrame = int((kNominalStart + 2.5) * kInternalRate / kFrameStep);
 constexpr double kCentreHz = 3.5 * kToneSpacingHz;
 
-struct Tuning {
-    int passes;
-    float sync_min;
-    int max_candidates;
-    int min_costas_hits;
-    int osd_order;  // 0: no OSD
-    int pair_span;
-};
-
-Tuning tuning_for(int depth) {
-    if (depth <= 1)
-        return Tuning{2, 2.0f, 200, 7, 0, 0};
-    if (depth == 2)
-        return Tuning{3, 1.8f, 300, 6, 1, 0};
-    return Tuning{3, 1.6f, 500, 5, 2, 30};
-}
-
 struct Candidate {
     float score;
     int bin;    // tone-0 bin in the spectrogram's range
@@ -88,6 +72,70 @@ inline cf cmul(cf a, cf b) {
 }
 
 }  // namespace
+
+DecoderTuning tuning_for_depth(int depth) {
+    DecoderTuning t;
+    if (depth <= 1) {
+        t.passes = 2;
+        t.sync_min = 2.0f;
+        t.max_candidates = 200;
+        t.min_costas_hits = 7;
+        t.osd_order = 0;
+    } else if (depth >= 3) {
+        t.sync_min = 1.6f;
+        t.max_candidates = 500;
+        t.min_costas_hits = 5;
+        t.osd_order = 2;
+    }
+    return t;
+}
+
+bool apply_tuning(DecoderTuning& t, const std::string& spec) {
+    size_t pos = 0;
+    while (pos < spec.size()) {
+        size_t end = spec.find(',', pos);
+        if (end == std::string::npos)
+            end = spec.size();
+        const std::string item = spec.substr(pos, end - pos);
+        pos = end + 1;
+        const size_t eq = item.find('=');
+        if (eq == std::string::npos)
+            return false;
+        const std::string key = item.substr(0, eq);
+        const double v = std::atof(item.c_str() + eq + 1);
+        if (key == "passes")
+            t.passes = int(v);
+        else if (key == "sync_min")
+            t.sync_min = float(v);
+        else if (key == "max_candidates")
+            t.max_candidates = int(v);
+        else if (key == "min_costas_hits")
+            t.min_costas_hits = int(v);
+        else if (key == "bp_max_hard")
+            t.bp_max_hard = int(v);
+        else if (key == "osd_order")
+            t.osd_order = int(v);
+        else if (key == "osd_pair_span")
+            t.osd_pair_span = int(v);
+        else if (key == "osd_min_costas")
+            t.osd_min_costas = int(v);
+        else if (key == "osd_max_hard")
+            t.osd_max_hard = int(v);
+        else if (key == "osd_weak_min_costas")
+            t.osd_weak_min_costas = int(v);
+        else if (key == "osd_weak_max_hard")
+            t.osd_weak_max_hard = int(v);
+        else if (key == "osd_min_sync")
+            t.osd_min_sync = float(v);
+        else if (key == "osd_low_hard")
+            t.osd_low_hard = int(v);
+        else if (key == "llr_scale")
+            t.llr_scale = float(v);
+        else
+            return false;
+    }
+    return true;
+}
 
 const char* Decode::quality() const {
     if (low_confidence)
@@ -202,7 +250,7 @@ void estimate_noise(const std::vector<cf>& x, int first_sample, int last_sample,
     }
 }
 
-std::vector<Candidate> find_candidates(const SlotDecoder::Work& w, const Tuning& tu, double min_hz, double max_hz) {
+std::vector<Candidate> find_candidates(const SlotDecoder::Work& w, const DecoderTuning& tu, double min_hz, double max_hz) {
     const int nb = w.nbins;
     // Per frame and bin, the power summed over the 8 tones from that bin.
     std::vector<float> tone_sum(size_t(kFrames) * size_t(nb), 0.0f);
@@ -340,6 +388,31 @@ void block_llrs(const cf (*c)[kToneCount], int span, Llrs& llr) {
     }
 }
 
+// Single-symbol soft bits divided by the symbol's strongest tone, so that a
+// symbol hit by an interfering signal carries no more weight than a clean
+// one: its bits are decided by ratios, not by absolute power.
+void relative_llrs(const cf (*c)[kToneCount], Llrs& llr) {
+    for (int d = 0; d < kDataSymbolCount; ++d) {
+        const cf* row = c[data_symbol_index(d)];
+        float mag[kToneCount];
+        float top = 1e-30f;
+        for (int k = 0; k < kToneCount; ++k) {
+            mag[k] = std::abs(row[k]);
+            top = std::max(top, mag[k]);
+        }
+        for (int i = 0; i < 3; ++i) {
+            float b0 = 0, b1 = 0;
+            for (int k = 0; k < kToneCount; ++k) {
+                if ((kToneToBits[k] >> (2 - i)) & 1)
+                    b1 = std::max(b1, mag[k]);
+                else
+                    b0 = std::max(b0, mag[k]);
+            }
+            llr[size_t(3 * d + i)] = (b0 - b1) / top;
+        }
+    }
+}
+
 void normalise(Llrs& llr, float scale) {
     double s2 = 0;
     for (float v : llr)
@@ -387,7 +460,7 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
     w.stats = SlotStats{};
     x.resize(kSlotSamples);
     valid_end = std::min(valid_end, size_t(kSlotSamples));
-    const Tuning tu = tuning_for(settings.depth);
+    const DecoderTuning tu = settings.custom_tuning ? settings.tuning : tuning_for_depth(settings.depth);
     const int64_t now_s = slot_start_ms / 1000;
     std::vector<Found> found;
     w.frame_first = int((valid_begin + kFrameStep - 1) / kFrameStep);
@@ -521,36 +594,44 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             if (hits < tu.min_costas_hits)
                 continue;
 
-            Llrs sets[3];
+            Llrs sets[4];
             for (int span = 1; span <= 3; ++span) {
                 block_llrs(c, span, sets[span - 1]);
-                normalise(sets[span - 1], 2.8f);
+                normalise(sets[span - 1], tu.llr_scale);
             }
+            relative_llrs(c, sets[3]);
+            normalise(sets[3], tu.llr_scale);
             std::optional<Codeword> cw;
             DecodeMethod method = DecodeMethod::Bp;
             int iterations = 0;
             int hard_errors = 0;
-            for (int s = 0; s < 3 && !cw; ++s) {
+            int span_used = 0;
+            for (int s = 0; s < 4 && !cw; ++s) {
                 ++w.stats.ldpc_runs;
                 const BpResult r = bp_decode(sets[s], 30);
                 if (r.converged && crc_ok(r.codeword)) {
                     const int he = hard_disagreements(r.codeword, sets[s]);
-                    if (he <= 36) {
+                    if (he <= tu.bp_max_hard) {
                         cw = r.codeword;
+                        span_used = s + 1;
                         iterations = r.iterations;
                         hard_errors = he;
                     }
                 }
             }
-            if (!cw && tu.osd_order > 0) {
+            const bool osd_sync =
+                hits >= std::min(tu.osd_min_costas, tu.osd_weak_min_costas) && cand.score >= tu.osd_min_sync;
+            const int osd_hard = hits >= tu.osd_min_costas ? tu.osd_max_hard : tu.osd_weak_max_hard;
+            if (!cw && tu.osd_order > 0 && osd_sync) {
                 OsdOptions o;
                 o.order = tu.osd_order;
-                o.pair_span = tu.pair_span;
+                o.pair_span = tu.osd_pair_span;
                 for (int s : {2, 0}) {
                     ++w.stats.osd_runs;
                     const OsdResult r = osd_decode(sets[s], o);
-                    if (r.found && r.disagreements <= 30) {
+                    if (r.found && r.disagreements <= osd_hard) {
                         cw = r.codeword;
+                        span_used = s + 1;
                         method = DecodeMethod::Osd;
                         hard_errors = r.disagreements;
                         break;
@@ -583,7 +664,10 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             d.ldpc_iterations = iterations;
             d.hard_errors = hard_errors;
             d.costas_hits = hits;
-            d.low_confidence = method == DecodeMethod::Osd && hard_errors > 22;
+            d.sync = cand.score;
+            d.llr_span = span_used;
+            d.low_confidence =
+                method == DecodeMethod::Osd && (hard_errors > tu.osd_low_hard || hits < tu.osd_min_costas);
             d.pass = pass;
 
             // Rebuild, refine the start to a sample at 6400 Hz, estimate the
@@ -598,26 +682,37 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             };
             auto sample = [&](long i) { return (i >= 0 && i < kSlotSamples) ? x[size_t(i)] : cf(0, 0); };
             build_ref(fd.t0);
+            // Timing metric: coherent over blocks of 8 symbols (1.28 s, over
+            // which the channel's phase holds), so that a time error shows as
+            // phase differences between tones; one symbol at a time it would
+            // hardly show.
             auto corr = [&](int shift) {
                 double total = 0;
-                for (int s = 0; s < kSymbolCount; ++s) {
+                for (int blk = 0; blk < kSymbolCount; blk += 8) {
                     cf acc(0, 0);
-                    const int base = margin + s * kInternalSamplesPerSymbol;
-                    for (int n = 0; n < kInternalSamplesPerSymbol; n += 2)
-                        acc += cmul_conj(sample(n_start + base + n + shift), w.ref[size_t(base + n)]);
+                    const int end = std::min(kSymbolCount, blk + 8) * kInternalSamplesPerSymbol;
+                    for (int n = blk * kInternalSamplesPerSymbol; n < end; n += 2)
+                        acc += cmul_conj(sample(n_start + margin + n + shift), w.ref[size_t(margin + n)]);
                     total += std::norm(acc);
                 }
                 return total;
             };
             int shift = 0;
-            double cbest = corr(0);
-            for (int step : {8, 4, 2, 1}) {
+            double cbest = -1;
+            for (int sft = -20; sft <= 20; sft += 4) {
+                const double v = corr(sft);
+                if (v > cbest) {
+                    cbest = v;
+                    shift = sft;
+                }
+            }
+            for (int step : {2, 1}) {
+                const int centre = shift;
                 for (int dir : {-1, 1}) {
-                    const double v = corr(shift + dir * step);
+                    const double v = corr(centre + dir * step);
                     if (v > cbest) {
                         cbest = v;
-                        shift += dir * step;
-                        break;
+                        shift = centre + dir * step;
                     }
                 }
             }
@@ -630,6 +725,28 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             }
             fd.t0 += (shift + frac) / kInternalRate;
             build_ref(fd.t0);
+            // The frequency from the sync search is good to about 0.05 Hz,
+            // which turns the phase by more than half a turn over 12.64 s.
+            // The phase step between neighbouring symbols' gains measures
+            // what is left; twice, as the first step may be off by a bit.
+            for (int iter = 0; iter < 2; ++iter) {
+                cf prev(0, 0);
+                std::complex<double> steps = 0;
+                for (int s = 0; s < kSymbolCount; ++s) {
+                    cf acc(0, 0);
+                    const int base = margin + s * kInternalSamplesPerSymbol;
+                    for (int n = 0; n < kInternalSamplesPerSymbol; n += 2)
+                        acc += cmul_conj(sample(n_start + base + n), w.ref[size_t(base + n)]);
+                    if (s > 0)
+                        steps += std::complex<double>(cmul_conj(acc, prev));
+                    prev = acc;
+                }
+                const double dfix = std::arg(steps) / (2.0 * M_PI * kSymbolSeconds);
+                if (std::fabs(dfix) > 0.5)
+                    break;
+                fd.f0 += dfix;
+                build_ref(fd.t0);
+            }
             w.gain_z.assign(size_t(len), cf(0, 0));
             w.gain_e.assign(size_t(len), cf(0, 0));
             for (int n = 0; n < len; ++n) {

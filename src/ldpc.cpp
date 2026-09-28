@@ -207,21 +207,32 @@ OsdResult osd_decode(const Llrs& llr, const OsdOptions& options) {
     for (int i = 0; i < kLdpcK; ++i)
         if (hard.get(pivot[i]))
             c0 ^= rows[i];
-    Row best = c0;
-    Row diff = c0;
-    diff ^= hard;
-    float best_d = weighted_distance(diff, weight);
+    // The nearest codeword tried whose CRC is right. The CRC is checked only
+    // for codewords nearer than the best one so far, which is few of them.
+    float best_d = 1e30f;
+    Row best{};
+    bool have = false;
+    auto consider = [&](const Row& c) {
+        Row d = c;
+        d ^= hard;
+        const float dist = weighted_distance(d, weight);
+        if (dist >= best_d)
+            return;
+        Codeword cw{};
+        for (int j = 0; j < kLdpcN; ++j)
+            cw[size_t(perm[size_t(j)])] = uint8_t(c.get(j));
+        if (!crc_ok(cw))
+            return;
+        best_d = dist;
+        best = c;
+        have = true;
+    };
+    consider(c0);
     // Order 1: every basis bit flipped once.
     for (int i = 0; i < kLdpcK; ++i) {
         Row c = c0;
         c ^= rows[i];
-        Row d = c;
-        d ^= hard;
-        const float dist = weighted_distance(d, weight);
-        if (dist < best_d) {
-            best_d = dist;
-            best = c;
-        }
+        consider(c);
     }
     // Order 2 among the least reliable basis bits, where a second error is
     // most likely.
@@ -233,23 +244,19 @@ OsdResult osd_decode(const Llrs& llr, const OsdOptions& options) {
             for (int k = i + 1; k < kLdpcK; ++k) {
                 Row c = ci;
                 c ^= rows[k];
-                Row d = c;
-                d ^= hard;
-                const float dist = weighted_distance(d, weight);
-                if (dist < best_d) {
-                    best_d = dist;
-                    best = c;
-                }
+                consider(c);
             }
         }
     }
+    if (!have)
+        return result;
     for (int j = 0; j < kLdpcN; ++j)
         result.codeword[size_t(perm[size_t(j)])] = uint8_t(best.get(j));
     Row d = best;
     d ^= hard;
     result.distance = best_d;
     result.disagreements = __builtin_popcountll(d.w[0]) + __builtin_popcountll(d.w[1]) + __builtin_popcountll(d.w[2]);
-    result.found = crc_ok(result.codeword);
+    result.found = true;
     return result;
 }
 

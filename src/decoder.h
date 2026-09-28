@@ -46,6 +46,10 @@ struct Decode {
     int hard_errors = 0;
     // Costas tones received as the strongest of their symbol, of 21.
     int costas_hits = 0;
+    // The candidate's Costas power ratio in the spectrogram.
+    float sync = 0;
+    // Which soft-bit set decoded: blocks of 1, 2 or 3 symbols.
+    int llr_span = 0;
     // An OSD decode that is far enough from the received bits that it may be
     // wrong; such decodes must not be reported to others.
     bool low_confidence = false;
@@ -55,6 +59,36 @@ struct Decode {
     const char* quality() const;
 };
 
+// The decoder's parameters for one depth. tuning_for_depth() gives the
+// defaults; the fields are public so that experiments (fern-ft8 --tune) can
+// vary them.
+struct DecoderTuning {
+    int passes = 3;
+    float sync_min = 1.8f;      // candidate threshold, Costas power ratio
+    int max_candidates = 300;   // per pass
+    int min_costas_hits = 6;    // of 21, before LDPC
+    int bp_max_hard = 36;       // hard errors a BP decode may have
+    int osd_order = 1;          // 0: no OSD
+    int osd_pair_span = 30;     // order 2 flips pairs among this many bits
+    // An OSD codeword is accepted with at most osd_max_hard hard errors when
+    // at least osd_min_costas of the 21 Costas tones were received right,
+    // or with at most osd_weak_max_hard when osd_weak_min_costas were.
+    int osd_min_costas = 11;
+    int osd_max_hard = 36;
+    int osd_weak_min_costas = 9;
+    int osd_weak_max_hard = 24;
+    // OSD runs only on candidates whose Costas power ratio reaches this:
+    // on white noise 99 % of candidates stay below 2.82.
+    float osd_min_sync = 2.8f;
+    // Above osd_low_hard hard errors or below osd_min_costas hits an OSD
+    // decode is low confidence.
+    int osd_low_hard = 30;
+    float llr_scale = 2.8f;
+};
+DecoderTuning tuning_for_depth(int depth);
+// Applies "key=value,key=value" to t; returns false on an unknown key.
+bool apply_tuning(DecoderTuning& t, const std::string& spec);
+
 struct DecodeSettings {
     // 1: fast, BP only; 2: BP and OSD order 1, three passes; 3: more
     // candidates and OSD order 2.
@@ -63,6 +97,9 @@ struct DecodeSettings {
     double min_hz = -1800;
     double max_hz = 1750;
     UnpackOptions unpack;
+    // Overrides tuning_for_depth(depth) when set.
+    bool custom_tuning = false;
+    DecoderTuning tuning;
 };
 
 struct SlotStats {

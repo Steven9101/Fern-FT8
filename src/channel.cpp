@@ -55,6 +55,8 @@ Channel::Channel(const ChannelConfig& config, CallsignHashTable* hashes)
     settings_.min_hz = lo;
     settings_.max_hz = hi;
     settings_.unpack = config.unpack;
+    settings_.custom_tuning = config.custom_tuning;
+    settings_.tuning = config.tuning;
     ring_.assign(size_t(kRing), std::complex<float>(0, 0));
     have_.assign(size_t(kRing), 0);
 }

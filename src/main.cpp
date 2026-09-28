@@ -41,6 +41,10 @@ void usage() {
                  "      Write a 15 s slot with one transmission of MESSAGE (default\n"
                  "      1500 Hz, DT 0, 12000 Hz), with white noise at SNR DB in 2500 Hz\n"
                  "      when --snr is given.\n"
+                 "  fern-ft8 noise [--minutes M] [--depth N] [--seed S] [--rate R] [--silence]\n"
+                 "      Feed M minutes (default 60) of white Gaussian noise, or digital\n"
+                 "      silence, through a live channel at R complex samples a second\n"
+                 "      (default 8000) and print every decode: each one is false.\n"
                  "  fern-ft8 bench [--depth N] [FILE.wav...]\n"
                  "      CPU time per busy and per quiet slot on one thread.\n",
                  FERN_FT8_VERSION);
@@ -82,7 +86,18 @@ struct Options {
     int depth = 2;
     double rate_test = 0;
     bool verbose = false;
+    std::string tune;  // "key=value,..." over the depth's defaults
 };
+
+// Applies --tune to a channel configuration; exits on a bad spec.
+void apply_tune(ChannelConfig& cfg, const std::string& tune) {
+    if (tune.empty())
+        return;
+    cfg.custom_tuning = true;
+    cfg.tuning = tuning_for_depth(cfg.depth);
+    if (!apply_tuning(cfg.tuning, tune))
+        throw std::invalid_argument("bad --tune: " + tune);
+}
 
 // Real audio at `rate` to complex baseband with audio 2000 Hz at 0 Hz, as a
 // FernSDR channel would deliver it, then optionally resampled to rate_test.
@@ -106,6 +121,7 @@ std::vector<SlotResult> decode_audio(const Audio& audio, int64_t utc, const Opti
     cfg.min_freq_hz = 200;
     cfg.max_freq_hz = 4000;
     cfg.depth = o.depth;
+    apply_tune(cfg, o.tune);
     Channel ch(cfg, &hashes);
     const double t0 = thread_cpu();
     std::vector<SlotResult> results;
@@ -130,8 +146,8 @@ void print_decode(const Decode& d, int hhmmss, bool verbose) {
                                 : int(sec_of_day / 3600 * 10000 + sec_of_day % 3600 / 60 * 100 + sec_of_day % 60);
     std::printf("%06d %3d %4.1f %4d ~  %s", hms, d.snr_db, std::fabs(d.dt) < 0.05 ? 0.0 : d.dt, int(std::lround(d.freq_hz)), d.message.text.c_str());
     if (verbose)
-        std::printf("   [%d.%d %s pass %d it %d hard %d costas %d]", d.message.i3, d.message.n3, d.quality(), d.pass,
-                    d.ldpc_iterations, d.hard_errors, d.costas_hits);
+        std::printf("   [%d.%d %s pass %d span %d it %d hard %d costas %d sync %.2f]", d.message.i3, d.message.n3,
+                    d.quality(), d.pass, d.llr_span, d.ldpc_iterations, d.hard_errors, d.costas_hits, d.sync);
     std::printf("\n");
 }
 
@@ -146,6 +162,8 @@ int cmd_decode(int argc, char** argv) {
             o.rate_test = std::atof(argv[++i]);
         else if (a == "--verbose")
             o.verbose = true;
+        else if (a == "--tune" && i + 1 < argc)
+            o.tune = argv[++i];
         else if (!a.empty() && a[0] == '-') {
             usage();
             return 2;
@@ -284,13 +302,82 @@ std::string isa_description() {
     return s;
 }
 
+int cmd_noise(int argc, char** argv) {
+    double minutes = 60, rate = 8000;
+    int depth = 3;
+    unsigned seed = 1;
+    bool silence = false;
+    std::string tune;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
+        const char* v = nullptr;
+        if (a == "--minutes" && (v = next()))
+            minutes = std::atof(v);
+        else if (a == "--depth" && (v = next()))
+            depth = std::atoi(v);
+        else if (a == "--seed" && (v = next()))
+            seed = unsigned(std::strtoul(v, nullptr, 10));
+        else if (a == "--rate" && (v = next()))
+            rate = std::atof(v);
+        else if (a == "--silence")
+            silence = true;
+        else if (a == "--tune" && (v = next()))
+            tune = v;
+        else {
+            usage();
+            return 2;
+        }
+    }
+    ChannelConfig cfg;
+    cfg.rate = rate;
+    cfg.depth = depth;
+    apply_tune(cfg, tune);
+    CallsignHashTable hashes;
+    Channel ch(cfg, &hashes);
+    std::mt19937_64 rng(seed);
+    std::normal_distribution<float> g(0.0f, 0.1f);
+    // Start on a slot boundary a day after the epoch, like a live stream.
+    const int64_t start_us = 86400LL * 1000000;
+    const size_t frame = 4096;
+    const uint64_t total = uint64_t(minutes * 60.0 * rate);
+    std::vector<std::complex<float>> buf(frame);
+    size_t slots = 0, decodes = 0;
+    double cpu = 0;
+    auto take = [&](std::vector<SlotResult> results) {
+        for (const SlotResult& r : results) {
+            ++slots;
+            cpu += r.cpu_seconds;
+            for (const Decode& d : r.decodes) {
+                ++decodes;
+                print_decode(d, -1, true);
+            }
+        }
+    };
+    for (uint64_t i = 0; i < total; i += frame) {
+        const size_t n = size_t(std::min<uint64_t>(frame, total - i));
+        for (size_t k = 0; k < n; ++k)
+            buf[k] = silence ? std::complex<float>(0, 0) : std::complex<float>(g(rng), g(rng));
+        ch.push(buf.data(), n, i, start_us + int64_t(std::llround(double(i) * 1e6 / rate)), 0);
+        take(ch.decode_ready());
+    }
+    take(ch.finish());
+    std::printf("%zu slots (%.1f minutes) of %s at depth %d: %zu decodes, %.3f s CPU per slot\n", slots,
+                double(slots) / 4.0, silence ? "silence" : "white noise", depth, decodes,
+                slots ? cpu / double(slots) : 0.0);
+    return decodes == 0 ? 0 : 3;
+}
+
 int cmd_bench(int argc, char** argv) {
     int depth = 0;
+    std::string tune;
     std::vector<std::string> files;
     for (int i = 0; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--depth" && i + 1 < argc)
             depth = std::atoi(argv[++i]);
+        else if (a == "--tune" && i + 1 < argc)
+            tune = argv[++i];
         else
             files.push_back(a);
     }
@@ -313,6 +400,7 @@ int cmd_bench(int argc, char** argv) {
         for (const Case& c : cases) {
             Options o;
             o.depth = d;
+            o.tune = tune;
             double best = 1e9;
             size_t decodes = 0;
             // Best of three runs, each with a fresh hash table.
@@ -344,6 +432,8 @@ int main(int argc, char** argv) {
             return cmd_decode(argc - 2, argv + 2);
         if (cmd == "encode")
             return cmd_encode(argc - 2, argv + 2);
+        if (cmd == "noise")
+            return cmd_noise(argc - 2, argv + 2);
         if (cmd == "bench")
             return cmd_bench(argc - 2, argv + 2);
         if (cmd == "--help" || cmd == "-h" || cmd == "help") {

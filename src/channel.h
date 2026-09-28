@@ -39,6 +39,9 @@ struct ChannelConfig {
     double min_freq_hz = 0;
     double max_freq_hz = 0;
     UnpackOptions unpack;
+    // Overrides the depth's defaults when set (experiments).
+    bool custom_tuning = false;
+    DecoderTuning tuning;
 };
 
 struct SlotResult {
