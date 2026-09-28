@@ -383,7 +383,7 @@ void block_llrs(const cf (*c)[kToneCount], int span, Llrs& llr) {
                     sum += c[data_symbol_index(d0 + s)][tone];
                     bits = (bits << 3) | kToneToBits[tone];
                 }
-                const float m = std::abs(sum);
+                const float m = std::sqrt(std::norm(sum));
                 for (int i = 0; i < 3 * len; ++i) {
                     const int bit = (bits >> (3 * len - 1 - i)) & 1;
                     float& slot = bit ? best1[i] : best0[i];
@@ -406,7 +406,7 @@ void relative_llrs(const cf (*c)[kToneCount], Llrs& llr) {
         float mag[kToneCount];
         float top = 1e-30f;
         for (int k = 0; k < kToneCount; ++k) {
-            mag[k] = std::abs(row[k]);
+            mag[k] = std::sqrt(std::norm(row[k]));
             top = std::max(top, mag[k]);
         }
         for (int i = 0; i < 3; ++i) {
@@ -762,15 +762,19 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
                 for (int blk = 0; blk < kSymbolCount; blk += 8) {
                     cf acc(0, 0);
                     const int end = std::min(kSymbolCount, blk + 8) * kInternalSamplesPerSymbol;
+                    // Every fourth sample: the signal is 50 Hz wide, far
+                    // below the 1600 Hz this still resolves.
                     for (int n = blk * kInternalSamplesPerSymbol; n < end; n += 2)
                         acc += cmul_conj(sample(n_start + margin + n + shift), w.ref[size_t(margin + n)]);
                     total += std::norm(acc);
                 }
                 return total;
             };
+            // The start from the 200 Hz stage is good to a few samples at
+            // 6400 Hz; search +-8 of them, then refine.
             int shift = 0;
             double cbest = -1;
-            for (int sft = -20; sft <= 20; sft += 4) {
+            for (int sft = -8; sft <= 8; sft += 4) {
                 const double v = corr(sft);
                 if (v > cbest) {
                     cbest = v;
