@@ -20,6 +20,10 @@ constexpr double kMaxSlipUs = 20000;
 
 int64_t floor_div(int64_t a, int64_t b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
 
+// Position of grid sample g in the ring; g may be negative (before 1970, as
+// for a file decoded with slot time 0).
+size_t ring_pos(int64_t g) { return size_t(g - floor_div(g, kRing) * kRing); }
+
 double thread_cpu_seconds() {
     timespec ts{};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
@@ -75,7 +79,7 @@ void Channel::anchor(uint64_t index, int64_t utc_us) {
     }
     if (slot_known_) {
         for (int64_t g = written_ + 1; g < g_first && g < written_ + 1 + kRing; ++g)
-            have_[size_t(g % kRing)] = 0;
+            have_[ring_pos(g)] = 0;
         written_ = g_first - 1;
     } else {
         // The first slot worth decoding is the one whose transmissions could
@@ -126,8 +130,8 @@ void Channel::produce() {
             }
             v = interp_.at(edge.data(), p - fl);
         }
-        ring_[size_t(next_g_ % kRing)] = v;
-        have_[size_t(next_g_ % kRing)] = 1;
+        ring_[ring_pos(next_g_)] = v;
+        have_[ring_pos(next_g_)] = 1;
         written_ = next_g_;
         ++next_g_;
     }
@@ -149,9 +153,9 @@ SlotResult Channel::decode_slot(int64_t slot) {
     size_t valid_begin = kSlotSamples, valid_end = 0, missing = 0;
     for (int64_t n = 0; n < kSlotSamples; ++n) {
         const int64_t g = g0 + n;
-        const bool ok = g <= written_ && g > written_ - kRing && have_[size_t(g % kRing)];
+        const bool ok = g <= written_ && g > written_ - kRing && have_[ring_pos(g)];
         if (ok) {
-            slot_buf_[size_t(n)] = ring_[size_t(g % kRing)];
+            slot_buf_[size_t(n)] = ring_[ring_pos(g)];
             valid_begin = std::min(valid_begin, size_t(n));
             valid_end = size_t(n) + 1;
         } else {

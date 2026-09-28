@@ -252,19 +252,27 @@ int cmd_encode(int argc, char** argv) {
     return 0;
 }
 
-// A busy slot: 30 transmissions across 200 to 3000 Hz at SNRs from -20 to
-// +10 dB and DT from -0.5 to 1.5 s, in white noise.
+// A busy slot: `signals` transmissions at random frequencies from 200 to
+// 3000 Hz, SNRs from -20 to +10 dB and DT from -0.5 to 1.5 s, in white
+// noise; they overlap as on a busy band.
 Audio synthetic_busy_slot(unsigned seed, int signals) {
     std::mt19937 rng(seed);
     const double rate = 12000, sigma = 0.02;
     const size_t n = size_t(15 * rate);
     std::vector<std::complex<float>> sum(n);
-    const char* first[] = {"CQ", "K1ABC", "W9XYZ", "DL1ABC", "JA1XYZ", "G4ABC", "VK2ABC", "PY2XYZ"};
-    const char* seconds[] = {"EA3ABC", "OH2XYZ", "N0AB", "SP9LKP", "HB9CUZ", "R1CBP", "IK4LZH", "ON6UF"};
+    auto call = [&]() {
+        const char* prefixes[] = {"K", "W", "DL", "JA", "G", "VK", "PY", "EA", "OH", "SP", "HB9", "R"};
+        std::string c = prefixes[rng() % 12];
+        if (c.size() < 3)
+            c += char('0' + rng() % 10);
+        for (int i = 0; i < 2 + int(rng() % 2); ++i)
+            c += char('A' + rng() % 26);
+        return c;
+    };
     const char* tails[] = {"FN42", "-12", "R-07", "RR73", "73", "JO31", "+03", "RRR"};
     for (int s = 0; s < signals; ++s) {
-        const std::string text = std::string(first[rng() % 8]) + " " + seconds[rng() % 8] + std::to_string(s % 10) +
-                                  (s % 2 ? "A" : "") + " " + tails[rng() % 8];
+        const std::string text = (s % 4 == 0 ? std::string("CQ") : call()) + " " + call() + " " +
+                                 (s % 4 == 0 ? std::string("IO91") : std::string(tails[rng() % 8]));
         auto p = pack_message(text);
         if (!p)
             continue;

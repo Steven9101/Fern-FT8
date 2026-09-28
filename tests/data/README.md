@@ -16,6 +16,6 @@ Only the recordings are used; no ft8_lib code is.
 `*.reference.txt` list the messages WSJT-X decodes from each file, one per
 line, sorted: those of WSJT-X 2.7.0-rc3's `jt9 -8 -d 3` together with the
 decodes ft8_lib ships next to each recording (made with WSJT-X). The golden
-tests in `tests/test_decoder.cpp` require every confident Fern-FT8 decode of
-these files to be in that list, and a minimum number of the list to be
-found.
+tests in `tests/test_decoder.cpp` require a minimum number of the list to be
+found and allow at most two confident decodes outside it per file (Fern-FT8
+finds some real signals WSJT-X does not).

@@ -4,7 +4,7 @@
 """Decode probability against SNR on white Gaussian noise.
 
     scripts/threshold.py [--trials 100] [--from -23] [--to -17] [--step 0.5]
-                         [--depth 3] [--generator fern|ft8sim] [--jt9 3]
+                         [--depth 3] [--generator fern|ft8sim] [--jt9 3] [--tune SPEC]
 
 For each SNR (dB in 2500 Hz), makes `trials` 15 s slots with one
 transmission and counts how often Fern-FT8 decodes that exact message; with
@@ -36,7 +36,7 @@ def decoded(lines, msg):
 
 
 def trial(args):
-    snr, i, depth, generator, jt9, seed = args
+    snr, i, depth, generator, jt9, seed, tune = args
     rng = random.Random(seed * 100003 + i * 7919 + int(snr * 100))
     with tempfile.TemporaryDirectory() as td:
         if generator == "ft8sim":
@@ -51,7 +51,8 @@ def trial(args):
             subprocess.run([FERN, "encode", msg, "--freq", "%.1f" % rng.uniform(300, 2700), "--dt",
                             "%.2f" % rng.uniform(-0.5, 1.0), "--snr", "%.2f" % snr, "--seed", str(rng.randrange(1 << 30)),
                             "-o", wav], check=True)
-        out = subprocess.run([FERN, "decode", wav, "--depth", str(depth)], capture_output=True, text=True).stdout
+        cmd = [FERN, "decode", wav, "--depth", str(depth)] + (["--tune", tune] if tune else [])
+        out = subprocess.run(cmd, capture_output=True, text=True).stdout
         ok = decoded(out.splitlines(), msg)
         ok_jt9 = None
         if jt9:
@@ -80,6 +81,7 @@ def main():
     ap.add_argument("--jt9", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
+    ap.add_argument("--tune", default="", help="decoder parameters, as fern-ft8 --tune takes them")
     a = ap.parse_args()
     if a.generator == "ft8sim" and not shutil.which("ft8sim"):
         sys.exit("ft8sim not found")
@@ -88,7 +90,7 @@ def main():
     while s <= a.hi + 1e-9:
         snrs.append(round(s, 2))
         s += a.step
-    jobs = [(snr, i, a.depth, a.generator, a.jt9, a.seed) for snr in snrs for i in range(a.trials)]
+    jobs = [(snr, i, a.depth, a.generator, a.jt9, a.seed, a.tune) for snr in snrs for i in range(a.trials)]
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
         results = list(ex.map(trial, jobs, chunksize=4))
     print("generator %s, %d trials per SNR, Fern-FT8 depth %d%s" % (

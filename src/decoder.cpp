@@ -49,6 +49,9 @@ constexpr double kNominalStart = kSlotLeadSeconds + kStartSeconds;
 // Latest start searched: DT +2.5 s, as WSJT-X.
 constexpr int kLastStartFrame = int((kNominalStart + 2.5) * kInternalRate / kFrameStep);
 constexpr double kCentreHz = 3.5 * kToneSpacingHz;
+// Delays tried when refining the start from phases: +-12 ms in 0.25 ms.
+constexpr int kTauSteps = 97;
+constexpr double kTauStep = 0.00025;
 
 struct Candidate {
     float score;
@@ -159,6 +162,8 @@ struct SlotDecoder::Work {
     std::vector<cf> gain_z, gain_e;
     // Tone correlators for 32-sample symbols: e^{-2 pi i (k - 3.5) n / 32}.
     cf tone_w[kToneCount][kBbSps];
+    // e^{2 pi i 6.25 Hz d tau} for tone steps d = -7..7 and the delays tried.
+    std::complex<double> tau_rot[kTauSteps][15];
     SlotStats stats;
 };
 
@@ -168,6 +173,10 @@ SlotDecoder::SlotDecoder() : work_(std::make_unique<Work>()) {
             const double a = -2.0 * M_PI * (k - 3.5) * n / kBbSps;
             work_->tone_w[k][n] = cf(float(std::cos(a)), float(std::sin(a)));
         }
+    for (int q = 0; q < kTauSteps; ++q)
+        for (int d = 0; d < 15; ++d)
+            work_->tau_rot[q][d] =
+                std::polar(1.0, 2.0 * M_PI * kToneSpacingHz * (d - 7) * (q - kTauSteps / 2) * kTauStep);
 }
 
 SlotDecoder::~SlotDecoder() = default;
@@ -545,41 +554,103 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
                 }
             }
             n0 = best_n;
-            best = -1;
-            const double coarse_df = df;
-            for (int k = -4; k <= 4; ++k) {
-                const double f = coarse_df + 0.1 * k;
-                const float p = costas_power(w.bb, n0, f, w.tone_w);
-                if (p > best) {
-                    best = p;
-                    best_f = f;
-                }
-            }
-            df = best_f;
 
             // Tone amplitudes of all 79 symbols, referred to one time origin
             // so that neighbouring symbols can be added coherently: with tones
             // at half-integer multiples of the symbol rate from the centre, a
             // per-symbol correlator's phase alternates by pi per symbol.
             cf c[kSymbolCount][kToneCount];
-            {
+            auto demodulate = [&](double f) {
                 cf rot[kBbSps];
                 for (int n = 0; n < kBbSps; ++n) {
-                    const double a = -2.0 * M_PI * df * n / kBbRate;
+                    const double a = -2.0 * M_PI * f * n / kBbRate;
                     rot[n] = cf(float(std::cos(a)), float(std::sin(a)));
                 }
+                cf w_rot[kToneCount][kBbSps];
+                for (int k = 0; k < kToneCount; ++k)
+                    for (int n = 0; n < kBbSps; ++n)
+                        w_rot[k][n] = cmul(w.tone_w[k][n], rot[n]);
                 for (int s = 0; s < kSymbolCount; ++s) {
                     const int start = n0 + kBbSps * s;
-                    const double a = -2.0 * M_PI * df * kBbSps * s / kBbRate + M_PI * s;
+                    const double a = -2.0 * M_PI * f * kBbSps * s / kBbRate + M_PI * s;
                     const cf sym_rot(float(std::cos(a)), float(std::sin(a)));
                     for (int k = 0; k < kToneCount; ++k) {
                         cf acc(0, 0);
                         if (start >= 0 && start + kBbSps <= kBbLen)
                             for (int n = 0; n < kBbSps; ++n)
-                                acc += cmul(w.bb[size_t(start + n)], cmul(w.tone_w[k][n], rot[n]));
+                                acc += cmul(w.bb[size_t(start + n)], w_rot[k][n]);
                         c[s][k] = cmul(acc, sym_rot);
                     }
                 }
+            };
+            // Frequency and time from the phases. The Costas power hardly
+            // changes with a frequency error of half a hertz or a time error
+            // of 10 ms, but the phases do: from one symbol to the next the
+            // phase turns by 2 pi df T, less 2 pi 6.25 Hz (k' - k) tau when the
+            // tone changes from k to k' and the signal is tau late. The
+            // products c[s+1] conj(c[s]), at the Costas tones and at the
+            // strongest tone elsewhere (a wrong decision only adds noise),
+            // give tau as the delay that lines up their phases best and df as
+            // their common turn. A whole number of samples of tau moves the
+            // start; the rest is taken off each tone's phase.
+            double tau_rest = 0;
+            auto correct_phases = [&]() {
+                for (int k = 0; k < kToneCount; ++k) {
+                    const double a = 2.0 * M_PI * kToneSpacingHz * (k - 3.5) * tau_rest;
+                    const cf r(float(std::cos(a)), float(std::sin(a)));
+                    for (int s = 0; s < kSymbolCount; ++s)
+                        c[s][k] = cmul(c[s][k], r);
+                }
+            };
+            demodulate(df);
+            for (int round = 0; round < 3; ++round) {
+                int tone[kSymbolCount];
+                for (int s = 0; s < kSymbolCount; ++s) {
+                    int arg = 0;
+                    for (int k = 1; k < kToneCount; ++k)
+                        if (std::norm(c[s][k]) > std::norm(c[s][arg]))
+                            arg = k;
+                    tone[s] = arg;
+                }
+                for (int blk = 0; blk < 3; ++blk)
+                    for (int j = 0; j < 7; ++j)
+                        tone[kCostasStart[blk] + j] = kCostas[j];
+                std::complex<double> z[kSymbolCount - 1];
+                int dk[kSymbolCount - 1];
+                for (int s = 0; s + 1 < kSymbolCount; ++s) {
+                    z[s] = std::complex<double>(cmul_conj(c[s + 1][tone[s + 1]], c[s][tone[s]]));
+                    dk[s] = tone[s + 1] - tone[s];
+                }
+                // Delays within +-12 ms, in steps of a quarter millisecond. The
+                // pairs with the same tone step are summed first.
+                std::complex<double> by_dk[15] = {};
+                for (int s = 0; s + 1 < kSymbolCount; ++s)
+                    by_dk[dk[s] + 7] += z[s];
+                double best_tau = 0, best_m = -1;
+                std::complex<double> best_sum = 0;
+                for (int q = 0; q < kTauSteps; ++q) {
+                    std::complex<double> sum = 0;
+                    for (int d = 0; d < 15; ++d)
+                        sum += by_dk[d] * w.tau_rot[q][d];
+                    const double m = std::norm(sum);
+                    if (m > best_m) {
+                        best_m = m;
+                        best_tau = (q - kTauSteps / 2) * kTauStep;
+                        best_sum = sum;
+                    }
+                }
+                const double step = std::arg(best_sum) / (2.0 * M_PI * kSymbolSeconds);
+                if (std::fabs(step) > 1.0)
+                    break;
+                df += step;
+                const double tau = tau_rest + best_tau;
+                const int whole = int(std::lround(tau * kBbRate));
+                n0 += whole;
+                tau_rest = tau - whole / kBbRate;
+                demodulate(df);
+                correct_phases();
+                if (std::fabs(step) < 0.02 && std::fabs(best_tau) < 0.0005)
+                    break;
             }
             int hits = 0;
             for (int blk = 0; blk < 3; ++blk)
@@ -654,7 +725,7 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             Found fd;
             fd.tones = tones_of(*cw);
             fd.f0 = f_ext - kCentreHz + df;
-            fd.t0 = n0 / kBbRate;
+            fd.t0 = n0 / kBbRate + tau_rest;
             Decode& d = fd.decode;
             d.slot_start_ms = slot_start_ms;
             d.message = std::move(*msg);
