@@ -57,6 +57,7 @@ struct Candidate {
     float score;
     int bin;    // tone-0 bin in the spectrogram's range
     int frame;  // start frame
+    int hits;   // Costas tones strongest in their symbol's spectrum
 };
 
 struct Found {
@@ -76,17 +77,25 @@ inline cf cmul(cf a, cf b) {
 
 }  // namespace
 
+// Depth 2 is the default. The candidate limits and the spectrogram check
+// were set by measurement on 62 real recordings and on white noise (see
+// docs/DESIGN.md): the check rejects cheaply what would fail later, so that
+// fewer, better candidates are looked at closely.
 DecoderTuning tuning_for_depth(int depth) {
     DecoderTuning t;
+    t.max_candidates = 150;
+    t.spec_min_hits = 6;
     if (depth <= 1) {
         t.passes = 2;
         t.sync_min = 2.0f;
-        t.max_candidates = 200;
+        t.max_candidates = 100;
+        t.spec_min_hits = 7;
         t.min_costas_hits = 7;
         t.osd_order = 0;
     } else if (depth >= 3) {
         t.sync_min = 1.6f;
-        t.max_candidates = 500;
+        t.max_candidates = 250;
+        t.spec_min_hits = 5;
         t.min_costas_hits = 5;
         t.osd_order = 2;
     }
@@ -112,6 +121,8 @@ bool apply_tuning(DecoderTuning& t, const std::string& spec) {
             t.sync_min = float(v);
         else if (key == "max_candidates")
             t.max_candidates = int(v);
+        else if (key == "spec_min_hits")
+            t.spec_min_hits = int(v);
         else if (key == "min_costas_hits")
             t.min_costas_hits = int(v);
         else if (key == "bp_max_hard")
@@ -320,7 +331,7 @@ std::vector<Candidate> find_candidates(const SlotDecoder::Work& w, const Decoder
                     }
                 }
             if (peak)
-                all.push_back(Candidate{v, b, t});
+                all.push_back(Candidate{v, b, t, 0});
         }
     }
     std::sort(all.begin(), all.end(), [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
@@ -332,8 +343,24 @@ std::vector<Candidate> find_candidates(const SlotDecoder::Work& w, const Decoder
                 near = true;
                 break;
             }
-        if (!near)
-            kept.push_back(c);
+        if (near)
+            continue;
+        Candidate k = c;
+        for (int blk = 0; blk < 3; ++blk)
+            for (int j = 0; j < 7; ++j) {
+                const int f = c.frame + kFramesPerSymbol * (kCostasStart[blk] + j);
+                if (f >= kFrames)
+                    continue;
+                const float* row = &w.power[size_t(f) * size_t(nb) + size_t(c.bin)];
+                int arg = 0;
+                for (int t = 1; t < kToneCount; ++t)
+                    if (row[2 * t] > row[2 * arg])
+                        arg = t;
+                k.hits += arg == kCostas[j];
+            }
+        if (k.hits < tu.spec_min_hits)
+            continue;
+        kept.push_back(k);
         if (int(kept.size()) >= tu.max_candidates)
             break;
     }

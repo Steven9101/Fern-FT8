@@ -184,9 +184,14 @@ int cmd_decode(int argc, char** argv) {
             hhmmss = 0;
         double cpu = 0;
         const auto results = decode_audio(audio, utc, o, hashes, &cpu);
-        for (const SlotResult& r : results)
+        for (const SlotResult& r : results) {
             for (const Decode& d : r.decodes)
                 print_decode(d, results.size() == 1 ? hhmmss : -1, o.verbose);
+            if (o.verbose)
+                std::fprintf(stderr, "slot %lld: %d passes, %d candidates, %d LDPC runs, %d OSD runs, %.3f s CPU\n",
+                             (long long)(r.slot_start_ms / 1000), r.stats.passes, r.stats.candidates,
+                             r.stats.ldpc_runs, r.stats.osd_runs, r.cpu_seconds);
+        }
         if (o.verbose)
             std::fprintf(stderr, "%s: %.3f s CPU\n", f.c_str(), cpu);
     }

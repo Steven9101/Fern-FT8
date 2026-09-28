@@ -65,8 +65,11 @@ struct Decode {
 struct DecoderTuning {
     int passes = 3;
     float sync_min = 1.8f;      // candidate threshold, Costas power ratio
-    int max_candidates = 300;   // per pass
+    int max_candidates = 150;   // per pass
     int min_costas_hits = 6;    // of 21, before LDPC
+    // Costas tones strongest among the 8 tone bins in the spectrogram, of
+    // 21, before a candidate is looked at closely.
+    int spec_min_hits = 6;
     int bp_max_hard = 36;       // hard errors a BP decode may have
     int osd_order = 1;          // 0: no OSD
     int osd_pair_span = 30;     // order 2 flips pairs among this many bits
