@@ -15,9 +15,9 @@ OPT ?= -O2
 CXXFLAGS_BASE := -std=c++17 $(OPT) -g -pthread -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 \
 	-DFERN_FT8_VERSION='"$(VERSION)"' -Isrc
 
-LIB_SRCS := src/protocol.cpp src/protocol_tables.cpp
+LIB_SRCS := src/protocol.cpp src/protocol_tables.cpp src/callsign_hash.cpp src/message.cpp
 PROGRAM_SRCS := src/main.cpp
-TEST_SRCS := tests/test_main.cpp tests/test_protocol.cpp
+TEST_SRCS := tests/test_main.cpp tests/test_protocol.cpp tests/test_message.cpp tests/test_callsign_hash.cpp
 
 BUILD := build
 TEST_DIR := build/test
