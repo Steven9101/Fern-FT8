@@ -33,6 +33,9 @@ struct BpResult {
 // Min-sum belief propagation, at most max_iterations. `beliefs`, if not
 // null, receives the bits' total LLRs after the last iteration.
 BpResult bp_decode(const Llrs& llr, int max_iterations, Llrs* beliefs = nullptr);
+// Four independent runs at once in SIMD lanes; each result is exactly what
+// bp_decode() gives for that input.
+std::array<BpResult, 4> bp_decode4(const std::array<const Llrs*, 4>& llrs, int max_iterations);
 
 struct OsdResult {
     bool found = false;

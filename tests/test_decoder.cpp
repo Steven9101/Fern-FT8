@@ -15,6 +15,7 @@
 #include "channel.h"
 #include "gfsk.h"
 #include "message.h"
+#include "simd.h"
 #include "test.h"
 #include "wav.h"
 
@@ -354,4 +355,39 @@ TEST(golden_decodes_of_real_recordings) {
         std::fprintf(stderr, "    %s: %zu of the %zu reference decodes\n", g.name, matched, want.size());
         CHECK(matched >= g.at_least);
     }
+}
+
+TEST(decodes_do_not_depend_on_the_simd_level) {
+    const SimdLevel saved = simd_level();
+    for (const char* name : {"20m_busy_test_01", "websdr_test4"}) {
+        const Audio a = read_wav(std::string("tests/data/") + name + ".wav");
+        cvec x(a.samples.size());
+        for (size_t i = 0; i < x.size(); ++i) {
+            const double ph = -2.0 * M_PI * 2000.0 * double(i) / a.rate;
+            x[i] = std::complex<float>(float(a.samples[i] * std::cos(ph)), float(a.samples[i] * std::sin(ph)));
+        }
+        std::vector<std::string> runs;
+        for (SimdLevel level : {SimdLevel::Scalar, SimdLevel::Baseline, SimdLevel::Avx2}) {
+            set_simd_level(level);
+            ChannelConfig cfg = config(a.rate);
+            cfg.width_hz = 4400;
+            cfg.min_freq_hz = 200;
+            cfg.max_freq_hz = 4000;
+            cfg.depth = 3;
+            Channel ch(cfg, nullptr);
+            std::string out;
+            char buf[160];
+            for (const auto& r : run_to_end(ch, x, a.rate, 15 * 1000.0))
+                for (const auto& d : r.decodes) {
+                    std::snprintf(buf, sizeof buf, "%s %.6f %.6f %d %s\n", d.message.text.c_str(), d.freq_hz, d.dt,
+                                  d.snr_db, d.quality());
+                    out += buf;
+                }
+            runs.push_back(out);
+        }
+        CHECK(!runs[0].empty());
+        CHECK(runs[0] == runs[1]);
+        CHECK(runs[0] == runs[2]);
+    }
+    set_simd_level(saved);
 }

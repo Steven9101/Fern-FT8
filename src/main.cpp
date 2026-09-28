@@ -19,6 +19,7 @@
 #include "gfsk.h"
 #include "message.h"
 #include "resampler.h"
+#include "simd.h"
 #include "wav.h"
 
 using namespace fern::ft8;
@@ -301,18 +302,16 @@ Audio synthetic_busy_slot(unsigned seed, int signals) {
 
 std::string isa_description() {
     std::string s;
-#if defined(__x86_64__) || defined(__i386__)
+#if defined(__x86_64__)
     s = "x86-64";
-    __builtin_cpu_init();
-    if (__builtin_cpu_supports("avx2"))
-        s += ", AVX2 available";
-    s += ", scalar code (compiled for the baseline ISA)";
 #elif defined(__aarch64__)
-    s = "aarch64, scalar code";
+    s = "aarch64";
+#elif defined(__arm__)
+    s = "arm";
 #else
-    s = "scalar code";
+    s = "other CPU";
 #endif
-    return s;
+    return s + ", vector code: " + simd_name(simd_level()) + " (CPU supports " + simd_name(simd_supported()) + ")";
 }
 
 int cmd_noise(int argc, char** argv) {

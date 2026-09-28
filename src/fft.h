@@ -26,11 +26,16 @@ public:
 private:
     void transform(cf* data, bool inverse) const;
 
+    // One radix-4 stage: twiddles per butterfly, forward [0] and inverse [1].
+    struct Stage {
+        size_t h = 0;
+        std::vector<cf> wa[2], wb[2], wbr[2];
+    };
+
     size_t n_;
     int log2n_;
     std::vector<uint32_t> bitrev_;
-    // e^{-2 pi i k/n} for k < n/2
-    std::vector<cf> twiddle_;
+    std::vector<Stage> stages_;
 };
 
 // One shared plan per size; plans are immutable, so threads may share them.

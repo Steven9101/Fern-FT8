@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 
 namespace fern::ft8 {
@@ -83,6 +84,142 @@ float weighted_distance(const Row& diff, const float* weight) {
 
 }  // namespace
 
+namespace {
+
+// Four independent min-sum decoders in the lanes of a 4 x 32-bit vector:
+// SSE2 on x86-64 and NEON on aarch64 are part of the baseline, so GCC's
+// vector extensions compile to them with no run-time dispatch, and to plain
+// scalar code elsewhere. Every lane does exactly the arithmetic of a single
+// decoder (the same operations in the same order, no fused multiply-add),
+// so its results are bit for bit those of bp_decode() on that lane's input.
+typedef float v4f __attribute__((vector_size(16)));
+typedef int32_t v4i __attribute__((vector_size(16)));
+
+constexpr int kLanes = 4;
+
+inline v4f vabs(v4f x) {
+    v4i bits;
+    std::memcpy(&bits, &x, sizeof bits);
+    bits &= 0x7fffffff;
+    v4f out;
+    std::memcpy(&out, &bits, sizeof out);
+    return out;
+}
+
+inline v4i sign_bits(v4f x) {
+    v4i bits;
+    std::memcpy(&bits, &x, sizeof bits);
+    return (bits >> 31) & 1;  // 1 where the sign bit is set, as for x < 0 but also -0
+}
+
+inline v4f with_sign(v4f mag, v4i sign) {
+    v4i bits;
+    std::memcpy(&bits, &mag, sizeof bits);
+    bits |= sign << 31;
+    v4f out;
+    std::memcpy(&out, &bits, sizeof out);
+    return out;
+}
+
+// One run of up to max_iterations over the four inputs.
+void bp_lanes(const Llrs* const* inputs, int max_iterations, BpResult* results) {
+    constexpr int lanes = kLanes;
+    const LdpcGraph& g = ldpc_graph();
+    const Edges& e = edges();
+    v4f llr[kLdpcN];
+    for (int b = 0; b < kLdpcN; ++b)
+        for (int l = 0; l < kLanes; ++l)
+            llr[b][l] = (*inputs[l])[size_t(b)];
+    v4f q[kLdpcM][7];
+    v4f r[kLdpcN][3];
+    std::memset(r, 0, sizeof r);
+    for (int c = 0; c < kLdpcM; ++c)
+        for (int k = 0; k < g.check_degree[c]; ++k)
+            q[c][k] = llr[g.check_bits[c][k]];
+    bool active[kLanes];
+    int best_unsatisfied[kLanes], since_best[kLanes];
+    for (int l = 0; l < kLanes; ++l) {
+        active[l] = l < lanes;
+        best_unsatisfied[l] = kLdpcM + 1;
+        since_best[l] = 0;
+    }
+    int remaining = lanes;
+    const v4f scale = {kMinSumScale, kMinSumScale, kMinSumScale, kMinSumScale};
+    v4f total[kLdpcN];
+    for (int it = 1; it <= max_iterations && remaining > 0; ++it) {
+        // Check update, normalised min-sum: each output has the sign of the
+        // product of the other inputs and 0.75 times the least of their
+        // magnitudes. On FT8's code it decodes as well as the exact
+        // sum-product rule (measured: 70 % against 68 % of 400 slots at
+        // -20.75 dB) and needs no tanh or log. The least and second least
+        // are tracked without branches; when two inputs tie for the least,
+        // both outputs get that value, as they should.
+        for (int c = 0; c < kLdpcM; ++c) {
+            const int deg = g.check_degree[c];
+            v4f m1 = {1e30f, 1e30f, 1e30f, 1e30f}, m2 = m1;
+            v4i sign = {0, 0, 0, 0};
+            for (int k = 0; k < deg; ++k) {
+                const v4f a = vabs(q[c][k]);
+                sign ^= sign_bits(q[c][k]);
+                const v4f hi = a > m1 ? a : m1;
+                m2 = hi < m2 ? hi : m2;
+                m1 = a < m1 ? a : m1;
+            }
+            for (int k = 0; k < deg; ++k) {
+                const v4f a = vabs(q[c][k]);
+                const v4f least = a == m1 ? m2 : m1;
+                r[g.check_bits[c][k]][e.slot[c][k]] = with_sign(scale * least, sign ^ sign_bits(q[c][k]));
+            }
+        }
+        for (int b = 0; b < kLdpcN; ++b)
+            total[b] = llr[b] + r[b][0] + r[b][1] + r[b][2];
+        for (int c = 0; c < kLdpcM; ++c)
+            for (int k = 0; k < g.check_degree[c]; ++k) {
+                const int b = g.check_bits[c][k];
+                q[c][k] = total[b] - r[b][e.slot[c][k]];
+            }
+        // Hard decisions are the sign bits; a check fails when its bits'
+        // decisions have odd parity.
+        v4i failing = {0, 0, 0, 0};
+        for (int c = 0; c < kLdpcM; ++c) {
+            v4i parity = {0, 0, 0, 0};
+            for (int k = 0; k < g.check_degree[c]; ++k)
+                parity ^= (total[g.check_bits[c][k]] < 0.0f) & 1;
+            failing += parity;
+        }
+        for (int l = 0; l < lanes; ++l) {
+            if (!active[l])
+                continue;
+            const int unsatisfied = failing[l];
+            BpResult& res = results[l];
+            res.iterations = it;
+            res.unsatisfied = unsatisfied;
+            bool stop = false;
+            if (unsatisfied == 0) {
+                res.converged = true;
+                stop = true;
+            } else if (unsatisfied < best_unsatisfied[l]) {
+                // Stop early when the count of failing checks stops falling:
+                // such runs almost never converge later, and noise makes
+                // most of them.
+                best_unsatisfied[l] = unsatisfied;
+                since_best[l] = 0;
+            } else if (++since_best[l] >= 6 && it >= 8) {
+                stop = true;
+            }
+            if (stop || it == max_iterations) {
+                for (int b = 0; b < kLdpcN; ++b)
+                    res.codeword[size_t(b)] = total[b][l] < 0.0f ? 1 : 0;
+                active[l] = false;
+                --remaining;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+// The plain scalar decoder, one input at a time.
 BpResult bp_decode(const Llrs& llr, int max_iterations, Llrs* beliefs) {
     const LdpcGraph& g = ldpc_graph();
     const Edges& e = edges();
@@ -98,11 +235,7 @@ BpResult bp_decode(const Llrs& llr, int max_iterations, Llrs* beliefs) {
     int best_unsatisfied = kLdpcM + 1;
     int since_best = 0;
     for (int it = 1; it <= max_iterations; ++it) {
-        // Check update, normalised min-sum: each output has the sign of the
-        // product of the other inputs and 0.75 times the least of their
-        // magnitudes. On FT8's code it decodes as well as the exact
-        // sum-product rule (measured: 70 % against 68 % of 400 slots at
-        // -20.75 dB) and needs no tanh or log.
+        // Check update, normalised min-sum, as in bp_lanes().
         for (int c = 0; c < kLdpcM; ++c) {
             const int deg = g.check_degree[c];
             float m1 = 1e30f, m2 = 1e30f;
@@ -158,6 +291,12 @@ BpResult bp_decode(const Llrs& llr, int max_iterations, Llrs* beliefs) {
     }
     result.codeword = hard;
     return result;
+}
+
+std::array<BpResult, 4> bp_decode4(const std::array<const Llrs*, 4>& llrs, int max_iterations) {
+    std::array<BpResult, 4> results;
+    bp_lanes(llrs.data(), max_iterations, results.data());
+    return results;
 }
 
 int hard_disagreements(const Codeword& cw, const Llrs& llr) {

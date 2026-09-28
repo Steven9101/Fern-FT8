@@ -3,6 +3,7 @@
 //
 // FFT, waveform, resampler and LDPC decoders.
 #include <cmath>
+#include <cstring>
 #include <complex>
 #include <random>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "ldpc.h"
 #include "message.h"
 #include "resampler.h"
+#include "simd.h"
 #include "test.h"
 
 using namespace fern::ft8;
@@ -40,6 +42,27 @@ TEST(fft_matches_a_direct_dft) {
             back = std::max(back, double(std::abs(y[j] / float(n) - x[j])));
         CHECK(back < 1e-5);
     }
+}
+
+TEST(fft_kernels_agree_to_the_bit) {
+    // The AVX2 kernel (where the CPU has it) and the scalar one.
+    std::mt19937 rng(10);
+    std::normal_distribution<float> g;
+    const SimdLevel saved = simd_level();
+    for (size_t n : {16u, 64u, 2048u, 4096u, 131072u}) {
+        std::vector<cf> x(n);
+        for (auto& v : x)
+            v = cf(g(rng), g(rng));
+        for (bool inverse : {false, true}) {
+            std::vector<cf> a = x, b = x;
+            set_simd_level(SimdLevel::Scalar);
+            inverse ? fft_plan(n).inverse(a.data()) : fft_plan(n).forward(a.data());
+            set_simd_level(SimdLevel::Avx2);
+            inverse ? fft_plan(n).inverse(b.data()) : fft_plan(n).forward(b.data());
+            CHECK(std::memcmp(a.data(), b.data(), n * sizeof(cf)) == 0);
+        }
+    }
+    set_simd_level(saved);
 }
 
 TEST(gfsk_pulse_has_unit_area) {
@@ -175,4 +198,32 @@ TEST(osd_finds_the_codeword_from_clean_bits) {
     CHECK(d.found);
     CHECK(d.codeword == cw);
     CHECK_EQ(d.disagreements, 0);
+}
+
+TEST(four_lane_bp_equals_four_scalar_runs) {
+    std::mt19937 rng(9);
+    const int trials = test::quick() ? 50 : 400;
+    int converged = 0;
+    for (int t = 0; t < trials; ++t) {
+        Llrs in[4];
+        for (int l = 0; l < 4; ++l) {
+            const Codeword cw = random_codeword(rng);
+            // From easy to hopeless, and an exact zero now and then.
+            in[l] = noisy(cw, 0.6 + 0.1 * ((t + l) % 6), rng);
+            if (t % 7 == 0)
+                in[l][size_t(t % kLdpcN)] = 0.0f;
+        }
+        const auto lanes = bp_decode4({&in[0], &in[1], &in[2], &in[3]}, 30);
+        for (int l = 0; l < 4; ++l) {
+            const BpResult one = bp_decode(in[l], 30);
+            CHECK_EQ(lanes[size_t(l)].converged, one.converged);
+            CHECK_EQ(lanes[size_t(l)].iterations, one.iterations);
+            CHECK_EQ(lanes[size_t(l)].unsatisfied, one.unsatisfied);
+            CHECK(lanes[size_t(l)].codeword == one.codeword);
+            converged += one.converged;
+        }
+    }
+    // Both kinds of run were covered.
+    CHECK(converged > trials);
+    CHECK(converged < 4 * trials);
 }

@@ -27,6 +27,7 @@
 #include "fft.h"
 #include "gfsk.h"
 #include "ldpc.h"
+#include "simd.h"
 
 namespace fern::ft8 {
 
@@ -724,9 +725,18 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             int iterations = 0;
             int hard_errors = 0;
             int span_used = 0;
+            // The four sets in one run, in SIMD lanes; the first set in order
+            // that decodes is taken, as if they had been tried one by one.
+            w.stats.ldpc_runs += 4;
+            std::array<BpResult, 4> bp;
+            if (simd_level() >= SimdLevel::Baseline) {
+                bp = bp_decode4({&sets[0], &sets[1], &sets[2], &sets[3]}, 30);
+            } else {
+                for (int s = 0; s < 4; ++s)
+                    bp[size_t(s)] = bp_decode(sets[s], 30);
+            }
             for (int s = 0; s < 4 && !cw; ++s) {
-                ++w.stats.ldpc_runs;
-                const BpResult r = bp_decode(sets[s], 30);
+                const BpResult& r = bp[size_t(s)];
                 if (r.converged && crc_ok(r.codeword)) {
                     const int he = hard_disagreements(r.codeword, sets[s]);
                     if (he <= tu.bp_max_hard) {
