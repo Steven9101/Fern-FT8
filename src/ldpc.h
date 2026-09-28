@@ -3,9 +3,9 @@
 //
 // Decoding the (174,91) LDPC code of [QEX] section 3 from soft bits.
 //
-// Belief propagation (the sum-product algorithm, Lin and Costello, "Error
-// Control Coding", 2nd ed., 2004, chapter 17) is fast and finds the codeword
-// for most signals. When it does not converge, ordered statistics decoding
+// Belief propagation (normalised min-sum, the usual simplification of the
+// sum-product algorithm; Lin and Costello, "Error Control Coding", 2nd ed.,
+// 2004, chapter 17) is fast and finds the codeword for most signals. When it does not converge, ordered statistics decoding
 // (OSD; Fossorier and Lin 1995, as in Lin and Costello chapter 10) takes the
 // 91 most reliable independent bits as right, re-encodes, and tries flipping
 // one or two of the least reliable of them, keeping the codeword closest to
@@ -30,7 +30,7 @@ struct BpResult {
     Codeword codeword{};
 };
 
-// Sum-product belief propagation, at most max_iterations. `beliefs`, if not
+// Min-sum belief propagation, at most max_iterations. `beliefs`, if not
 // null, receives the bits' total LLRs after the last iteration.
 BpResult bp_decode(const Llrs& llr, int max_iterations, Llrs* beliefs = nullptr);
 

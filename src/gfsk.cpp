@@ -46,41 +46,51 @@ void add_ft8_waveform(const Tones& tones, double rate, double f0, double start, 
     const double T = kSymbolSeconds;
     const double duration = kSymbolCount * T;
     const double dt = 1.0 / rate;
-    // Frequency at time tau from the start, in hertz; the tone before the
-    // first and after the last is taken to continue, so that the edges
-    // are steady under the ramps.
-    auto freq = [&](double tau) {
-        const int m = int(std::floor(tau / T));
-        double dev = 0.0;
-        for (int s = m - 1; s <= m + 1; ++s) {
-            const int idx = s < 0 ? 0 : s >= kSymbolCount ? kSymbolCount - 1 : s;
-            dev += tones[size_t(idx)] * pulse_lookup(tau / T - (s + 0.5));
-        }
-        return f0 + kToneSpacingHz * dev;
+    const double ramp = T / 8.0;
+    // Frequency deviation in tones at time tau from the start. The tone
+    // before the first and after the last is taken to continue, so that the
+    // edges are steady under the ramps; pulses two or more symbols away
+    // contribute nothing (erf(10.7) is 1 in double).
+    auto deviation = [&](double tau) {
+        const double x = tau / T;
+        const double fl = std::floor(x);
+        const int m = int(fl);
+        const double u = x - fl;
+        auto tone = [&](int s) { return double(tones[size_t(s < 0 ? 0 : s >= kSymbolCount ? kSymbolCount - 1 : s)]); };
+        return tone(m - 1) * pulse_lookup(u + 0.5) + tone(m) * pulse_lookup(u - 0.5) +
+               tone(m + 1) * pulse_lookup(u - 1.5);
     };
     const double first = std::ceil(start * rate);
-    size_t i0 = first < 0.0 ? 0 : size_t(first);
+    const size_t i0 = first < 0.0 ? 0 : size_t(first);
     if (i0 >= n)
         return;
-    double tau = double(i0) * dt - start;
-    // Phase at the first sample: integrate from the start to it.
-    double phase = 2.0 * M_PI * freq(0.5 * tau) * tau;
+    const double tau0 = double(i0) * dt - start;
+    // Phase at the first sample, integrated from the start by the midpoint
+    // rule; then the phasor turns sample by sample. Its step is the carrier
+    // f0, the same for every sample, times the deviation's small turn,
+    // below 2 pi 43.75 Hz / rate, whose sine and cosine a few terms of
+    // their series give to 1e-9.
+    const double phase0 = 2.0 * M_PI * (f0 + kToneSpacingHz * deviation(0.5 * tau0)) * tau0;
+    std::complex<double> p = std::polar(1.0, phase0);
+    const std::complex<double> carrier = std::polar(1.0, 2.0 * M_PI * f0 * dt);
+    const double k = 2.0 * M_PI * kToneSpacingHz * dt;
     for (size_t i = i0; i < n; ++i) {
-        tau = double(i) * dt - start;
+        const double tau = double(i) * dt - start;
         if (tau >= duration)
             break;
         double env = 1.0;
-        const double ramp = T / 8.0;
         if (tau < ramp)
             env = 0.5 * (1.0 - std::cos(M_PI * tau / ramp));
         else if (tau > duration - ramp)
             env = 0.5 * (1.0 - std::cos(M_PI * (duration - tau) / ramp));
-        out[i] += std::complex<float>(float(amplitude * env * std::cos(phase)), float(amplitude * env * std::sin(phase)));
-        phase += 2.0 * M_PI * freq(tau + 0.5 * dt) * dt;
-        if (phase > M_PI * 64)
-            phase = std::fmod(phase, 2.0 * M_PI);
-        else if (phase < -M_PI * 64)
-            phase = std::fmod(phase, 2.0 * M_PI);
+        const double a = amplitude * env;
+        out[i] += std::complex<float>(float(a * p.real()), float(a * p.imag()));
+        const double x = k * deviation(tau + 0.5 * dt);
+        const double x2 = x * x;
+        const std::complex<double> turn(1.0 - x2 / 2.0 + x2 * x2 / 24.0, x * (1.0 - x2 / 6.0 + x2 * x2 / 120.0));
+        p *= carrier * turn;
+        if ((i & 1023) == 0)
+            p /= std::abs(p);
     }
 }
 

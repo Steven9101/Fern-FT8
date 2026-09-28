@@ -816,7 +816,15 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
                 if (std::fabs(dfix) > 0.5)
                     break;
                 fd.f0 += dfix;
-                build_ref(fd.t0);
+                // Shifting the rebuilt signal in frequency is a phase ramp
+                // from its start.
+                const double t_rel = fd.t0 - double(n_start) / kInternalRate;
+                std::complex<double> ph = std::polar(1.0, -2.0 * M_PI * dfix * t_rel);
+                const std::complex<double> stp = std::polar(1.0, 2.0 * M_PI * dfix / kInternalRate);
+                for (int n = 0; n < len; ++n) {
+                    w.ref[size_t(n)] = cmul(w.ref[size_t(n)], cf(float(ph.real()), float(ph.imag())));
+                    ph *= stp;
+                }
             }
             w.gain_z.assign(size_t(len), cf(0, 0));
             w.gain_e.assign(size_t(len), cf(0, 0));
