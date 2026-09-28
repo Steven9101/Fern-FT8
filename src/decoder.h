@@ -86,7 +86,6 @@ struct DecoderTuning {
     // Above osd_low_hard hard errors or below osd_min_costas hits an OSD
     // decode is low confidence.
     int osd_low_hard = 30;
-    float llr_scale = 2.8f;
 };
 DecoderTuning tuning_for_depth(int depth);
 // Applies "key=value,key=value" to t; returns false on an unknown key.

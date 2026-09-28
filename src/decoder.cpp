@@ -144,8 +144,6 @@ bool apply_tuning(DecoderTuning& t, const std::string& spec) {
             t.osd_min_sync = float(v);
         else if (key == "osd_low_hard")
             t.osd_low_hard = int(v);
-        else if (key == "llr_scale")
-            t.llr_scale = float(v);
         else
             return false;
     }
@@ -470,12 +468,14 @@ void relative_llrs(const cf (*c)[kToneCount], Llrs& llr) {
     }
 }
 
-void normalise(Llrs& llr, float scale) {
+// Unit root-mean-square: min-sum and OSD do not depend on the scale, this
+// only keeps the numbers in a comfortable range.
+void normalise(Llrs& llr) {
     double s2 = 0;
     for (float v : llr)
         s2 += double(v) * v;
     const double rms = std::sqrt(s2 / kLdpcN);
-    const float k = rms > 0 ? float(scale / rms) : 0.0f;
+    const float k = rms > 0 ? float(1.0 / rms) : 0.0f;
     for (float& v : llr)
         v *= k;
 }
@@ -716,10 +716,10 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             Llrs sets[4];
             for (int span = 1; span <= 3; ++span) {
                 block_llrs(c, span, sets[span - 1]);
-                normalise(sets[span - 1], tu.llr_scale);
+                normalise(sets[span - 1]);
             }
             relative_llrs(c, sets[3]);
-            normalise(sets[3], tu.llr_scale);
+            normalise(sets[3]);
             std::optional<Codeword> cw;
             DecodeMethod method = DecodeMethod::Bp;
             int iterations = 0;
