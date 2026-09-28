@@ -16,7 +16,7 @@ CXXFLAGS_BASE := -std=c++17 $(OPT) -g -pthread -Wall -Wextra -Wpedantic -Wshadow
 	-DFERN_FT8_VERSION='"$(VERSION)"' -Isrc
 
 LIB_SRCS := src/protocol.cpp src/protocol_tables.cpp src/callsign_hash.cpp src/message.cpp src/fft.cpp \
-	src/gfsk.cpp src/resampler.cpp src/ldpc.cpp src/wav.cpp
+	src/gfsk.cpp src/resampler.cpp src/ldpc.cpp src/wav.cpp src/decoder.cpp src/channel.cpp
 PROGRAM_SRCS := src/main.cpp
 TEST_SRCS := tests/test_main.cpp tests/test_protocol.cpp tests/test_message.cpp tests/test_callsign_hash.cpp \
 	tests/test_dsp.cpp
@@ -48,7 +48,7 @@ ASAN_OBJS := $(call objs,$(ASAN_DIR),$(LIB_SRCS) $(TEST_SRCS))
 
 .PHONY: all test test-asan bench clean print-version check-tables
 
-all: $(BUILD)/libfernft8.a
+all: $(BUILD)/libfernft8.a $(BUILD)/fern-ft8
 
 $(BUILD)/libfernft8.a: $(LIB_OBJS)
 	rm -f $@
@@ -67,7 +67,7 @@ $(ASAN_DIR)/fern-ft8-tests: $(ASAN_OBJS)
 check-tables:
 	python3 tools/gen_tables.py --check
 
-test: $(TEST_DIR)/fern-ft8-tests check-tables
+test: $(TEST_DIR)/fern-ft8-tests $(BUILD)/fern-ft8 check-tables
 	$(TEST_DIR)/fern-ft8-tests
 
 test-asan: $(ASAN_DIR)/fern-ft8-tests
