@@ -19,10 +19,11 @@ CXXFLAGS_BASE := -std=c++17 $(OPT) -g -pthread -Wall -Wextra -Wpedantic -Wshadow
 	-DFERN_FT8_VERSION='"$(VERSION)"' -Isrc
 
 LIB_SRCS := src/protocol.cpp src/protocol_tables.cpp src/callsign_hash.cpp src/message.cpp src/fft.cpp \
-	src/gfsk.cpp src/resampler.cpp src/ldpc.cpp src/wav.cpp src/decoder.cpp src/channel.cpp src/simd.cpp
-PROGRAM_SRCS := src/main.cpp
+	src/gfsk.cpp src/resampler.cpp src/ldpc.cpp src/wav.cpp src/decoder.cpp src/channel.cpp src/simd.cpp \
+	src/json.cpp
+PROGRAM_SRCS := src/main.cpp src/module.cpp
 TEST_SRCS := tests/test_main.cpp tests/test_protocol.cpp tests/test_message.cpp tests/test_callsign_hash.cpp \
-	tests/test_dsp.cpp tests/test_decoder.cpp
+	tests/test_dsp.cpp tests/test_decoder.cpp tests/test_module.cpp
 
 BUILD := build
 TEST_DIR := build/test

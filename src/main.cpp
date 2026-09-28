@@ -18,6 +18,7 @@
 #include "channel.h"
 #include "gfsk.h"
 #include "message.h"
+#include "module.h"
 #include "resampler.h"
 #include "simd.h"
 #include "wav.h"
@@ -439,6 +440,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string cmd = argv[1];
+    // As FernSDR starts it: a decoder session on its descriptors.
+    if (cmd == "--fernsdr-module") return fern::ft8::run_module(argc, argv);
     try {
         if (cmd == "decode")
             return cmd_decode(argc - 2, argv + 2);
