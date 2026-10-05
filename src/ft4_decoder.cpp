@@ -15,7 +15,7 @@
 //     phases of neighbouring symbols, then coherently over the whole
 //     transmission; cut the baseband again so that symbols start on its
 //     samples, and take the 4 tone amplitudes of the 103.
-//  4. Soft bits from blocks of 6, 4 and 2 symbols (noncoherent block
+//  4. Soft bits from blocks of 6, 4 and 1 symbols (noncoherent block
 //     detection, [QEX] section 6, with longer blocks than its 1, 2 and 4),
 //     and the interference-tolerant single-symbol set, tried with belief
 //     propagation, then OSD.
@@ -68,7 +68,7 @@ struct BlockSet {
     int span;
     int first_len;
 };
-constexpr BlockSet kBlockSets[3] = {{6, 0}, {4, 2}, {2, 0}};
+constexpr BlockSet kBlockSets[3] = {{6, 0}, {4, 2}, {1, 0}};
 
 // A candidate's baseband: the bins within 130 Hz of its centre, tapered
 // from 90 Hz out.
@@ -418,7 +418,11 @@ std::pair<double, double> coherent_fine(const cf (*c)[kToneCount]) {
 // tail of at most 3 symbols, whose 4^3 partial sums make every sequence's
 // sum in one addition; the largest power for each head is what a head bit
 // needs, the largest for each tail what a tail bit needs, and the square
-// root is taken of those maxima only.
+// root is taken of those maxima only. Single symbols keep the powers
+// themselves: on a channel that fades within a symbol the received phase
+// means nothing and the power is the better measure (square-law detection),
+// which decoded 76 of 100 slots at -9 dB on the 10 Hz channel of [QEX]
+// Table 6 against 69 with magnitudes, and the same elsewhere.
 void block_llrs(const cf (*c)[kToneCount], int span, int first_len, Llrs& llr) {
     cf head[64], tail[64];
     float head_max[64], tail_max[64];
@@ -462,7 +466,7 @@ void block_llrs(const cf (*c)[kToneCount], int span, int first_len, Llrs& llr) {
                         best0 = std::max(best0, m[base + j]);
                         best1 = std::max(best1, m[base + run + j]);
                     }
-                llr[size_t(2 * d0 + i)] = std::sqrt(best0) - std::sqrt(best1);
+                llr[size_t(2 * d0 + i)] = len == 1 ? best0 - best1 : std::sqrt(best0) - std::sqrt(best1);
             }
             first += len;
         }
@@ -708,14 +712,14 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
             demodulate(df);
 
             // Four soft-bit sets, one per vector lane: blocks of 6 symbols,
-            // of 4 starting 2 symbols into each group, of 2, and the
-            // relative single-symbol set. [QEX] section 6 has blocks of 1,
-            // 2 and 4 for FT4; with the start and frequency found as
-            // precisely as above, longer blocks gain more: on white noise
-            // the decode rate at -17.5 dB rose from 0.27 to 0.45, and on
-            // two-path fading channels (0.5 Hz and 1 Hz spread) it was as
-            // good or better (docs/DESIGN.md). Blocks that start elsewhere
-            // than the others' add more than blocks of 1 did.
+            // of 4 starting 2 symbols into each group, single symbols, and
+            // the relative single-symbol set. [QEX] section 6 has blocks of
+            // 1, 2 and 4 for FT4; with the start and frequency found as
+            // precisely as above, longer blocks gain more where the channel
+            // holds its phase (0.5 dB on white noise, 0.6 and 0.3 dB with
+            // 0.5 and 1 Hz of Doppler spread), and blocks that start where
+            // the others do not add more than blocks of 2 did. Single
+            // symbols keep fast fading decodable (docs/DESIGN.md).
             Llrs sets[4];
             for (int i = 0; i < 3; ++i) {
                 block_llrs(c, kBlockSets[i].span, kBlockSets[i].first_len, sets[i]);
@@ -759,8 +763,11 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
                 OsdOptions o;
                 o.order = tu.osd_order;
                 o.pair_span = tu.osd_pair_span;
-                // OSD on the sets of 6 and of 4.
-                for (int s : {0, 1}) {
+                // OSD on the three block sets: the single-symbol one finds
+                // what fast fading leaves (at -10 dB on the 10 Hz channel 71
+                // of 100 slots against 54 without it), the others what
+                // steadier channels do.
+                for (int s : {0, 1, 2}) {
                     ++w.stats.osd_runs;
                     const OsdResult r = osd_decode(sets[s], o);
                     int total = 0;
