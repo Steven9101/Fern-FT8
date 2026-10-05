@@ -5,7 +5,7 @@
 
     scripts/threshold.py [--mode ft8|ft4] [--trials 100] [--from -23] [--to -17]
                          [--step 0.5] [--depth 3] [--generator fern|ft8sim|ft4code]
-                         [--jt9 3] [--tune SPEC]
+                         [--fading HZ,MS] [--jt9 3] [--tune SPEC]
 
 For each SNR (dB in 2500 Hz), makes `trials` slots (15 s, or 7.5 s for FT4)
 with one transmission and counts how often Fern-FT8 decodes that exact
@@ -15,8 +15,10 @@ message; with --jt9 N, jt9 -8 -d N (jt9 -5 for FT4) decodes the same files.
 messages; `ft8sim` uses WSJT-X's simulator ("K1ABC W9XYZ EN37", 1500 Hz,
 DT 0), an independent transmitter. `ft4code` takes the tones of random
 messages from WSJT-X's ft4code and sends them with `fern-ft8 encode
---tones`, at random frequencies and start times as for `fern`. Prints the
+--tones`, at random frequencies and start times as for `fern`. --fading
+sends them over two fading paths (`fern-ft8 encode --fading`). Prints the
 table and the SNR of 50 % decode probability, interpolated linearly.
+FERN_FT8 in the environment names another build of fern-ft8 to use.
 """
 import argparse
 import glob
@@ -30,7 +32,7 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FERN = os.path.join(ROOT, "build", "fern-ft8")
+FERN = os.environ.get("FERN_FT8", os.path.join(ROOT, "build", "fern-ft8"))
 CALLS = ["K1ABC", "W9XYZ", "DL1ABC", "JA1XYZ", "G4ABC", "VK2ABC", "PY2XYZ", "EA3ABC", "OH2XYZ", "N0AB", "SP9LKP"]
 GRIDS = ["FN42", "EN37", "JO31", "IO91", "QF56", "GG66", "KP20", "JN58"]
 
@@ -49,7 +51,7 @@ def decoded(lines, msg):
 
 
 def trial(args):
-    snr, i, depth, generator, jt9, seed, tune, mode = args
+    snr, i, depth, generator, jt9, seed, tune, mode, fading = args
     rng = random.Random(seed * 100003 + i * 7919 + int(snr * 100))
     with tempfile.TemporaryDirectory() as td:
         if generator == "ft8sim":
@@ -67,7 +69,8 @@ def trial(args):
                 what = ["--tones", tones.strip().splitlines()[-1]]
             subprocess.run([FERN, "encode"] + what + ["--mode", mode, "--freq", "%.1f" % rng.uniform(300, 2700), "--dt",
                             "%.2f" % rng.uniform(-0.5, 0.8 if mode == "ft4" else 1.0), "--snr", "%.2f" % snr,
-                            "--seed", str(rng.randrange(1 << 30)), "-o", wav], check=True)
+                            "--seed", str(rng.randrange(1 << 30)), "-o", wav] +
+                           (["--fading", fading] if fading else []), check=True)
         cmd = [FERN, "decode", wav, "--mode", mode, "--depth", str(depth)] + (["--tune", tune] if tune else [])
         out = subprocess.run(cmd, capture_output=True, text=True).stdout
         ok = decoded(out.splitlines(), msg)
@@ -97,6 +100,7 @@ def main():
     ap.add_argument("--step", type=float, default=0.5)
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--generator", choices=["fern", "ft8sim", "ft4code"], default="fern")
+    ap.add_argument("--fading", default="", help="Doppler spread in Hz and delay in ms, as HZ,MS")
     ap.add_argument("--jt9", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
@@ -111,11 +115,15 @@ def main():
     while s <= a.hi + 1e-9:
         snrs.append(round(s, 2))
         s += a.step
-    jobs = [(snr, i, a.depth, a.generator, a.jt9, a.seed, a.tune, a.mode) for snr in snrs for i in range(a.trials)]
+    if a.fading and a.generator == "ft8sim":
+        sys.exit("--fading needs --generator fern or ft4code")
+    jobs = [(snr, i, a.depth, a.generator, a.jt9, a.seed, a.tune, a.mode, a.fading)
+            for snr in snrs for i in range(a.trials)]
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
         results = list(ex.map(trial, jobs, chunksize=4))
-    print("%s, generator %s, %d trials per SNR, Fern-FT8 depth %d%s" % (
-        a.mode.upper(), a.generator, a.trials, a.depth, (", jt9 depth %d" % a.jt9) if a.jt9 else ""))
+    print("%s, generator %s%s, %d trials per SNR, Fern-FT8 depth %d%s" % (
+        a.mode.upper(), a.generator, (", fading " + a.fading) if a.fading else "", a.trials, a.depth,
+        (", jt9 depth %d" % a.jt9) if a.jt9 else ""))
     fern_pts, jt9_pts = [], []
     for snr in snrs:
         r = [x for x in results if x[0] == snr]

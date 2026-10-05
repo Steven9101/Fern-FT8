@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "fern_ft8.h"
@@ -476,4 +477,81 @@ TEST(ft4_decodes_do_not_depend_on_the_simd_level) {
     CHECK(!runs[0].empty());
     CHECK(runs[0] == runs[1]);
     CHECK(runs[0] == runs[2]);
+}
+
+TEST(ft8_and_ft4_channels_decode_at_once_with_one_hash_table) {
+    // An FT4 channel hears PJ4/K1ABC call CQ in full; an FT8 channel, on
+    // another thread at the same time, decodes its own slot; then a second
+    // FT4 slot answers PJ4/K1ABC by hash, resolved through the shared table.
+    const double rate = 8000, slot = 15.0 * 9000;
+    CallsignHashTable hashes;
+    const cvec a = make_ft4({{"CQ PJ4/K1ABC", 1000.0, 0.0, -5}}, rate, 2000, slot - 1.0, 8.4, slot, 30);
+    const cvec b = make_ft4({{"<PJ4/K1ABC> W9XYZ -11", 1500.0, 0.0, -5}}, rate, 2000, slot + 6.5, 8.4, slot + 7.5, 31);
+    // The FT8 channel's slot, made the same way as test_decoder.cpp does.
+    cvec c(size_t(18.4 * rate));
+    {
+        const auto p = pack_message("CQ DL1ABC JO31");
+        REQUIRE(p.has_value());
+        add_ft8_waveform(tones_of(encode_codeword(*p)), rate, 700.0 - 2000.0, 2.0 + kStartSeconds,
+                         float(std::sqrt(std::pow(10.0, -0.5) * 2500.0 / rate)), c.data(), c.size());
+        std::mt19937 rng(32);
+        std::normal_distribution<float> g(0.0f, float(std::sqrt(0.5)));
+        for (auto& v : c)
+            v += std::complex<float>(g(rng), g(rng));
+    }
+    std::vector<SlotResult> ra, rb, rc;
+    std::thread t8([&] {
+        ChannelConfig cfg;
+        cfg.rate = rate;
+        Channel ch(cfg, &hashes);
+        rc = run_to_end(ch, c, rate, slot - 2.0);
+    });
+    std::thread t4([&] {
+        Channel ch(ft4_config(rate), &hashes);
+        ra = run_to_end(ch, a, rate, slot - 1.0);
+    });
+    t4.join();
+    t8.join();
+    Channel ch(ft4_config(rate), &hashes);
+    rb = run_to_end(ch, b, rate, slot + 6.5);
+    CHECK(find(ra, "CQ PJ4/K1ABC") != nullptr);
+    CHECK(find(rb, "<PJ4/K1ABC> W9XYZ -11") != nullptr);
+    CHECK(find(rc, "CQ DL1ABC JO31") != nullptr);
+}
+
+namespace {
+
+// Runs build/fern-ft8 with `args` and returns what it printed.
+std::string run_cli(const std::string& args) {
+    std::string out;
+    FILE* p = popen(("build/fern-ft8 " + args + " 2>&1").c_str(), "r");
+    if (!p)
+        return out;
+    char buf[512];
+    while (std::fgets(buf, sizeof buf, p))
+        out += buf;
+    pclose(p);
+    return out;
+}
+
+}  // namespace
+
+TEST(command_line_writes_and_decodes_ft4_slots) {
+    const std::string wav = "build/test/ft4-cli.wav";
+    // A message, as jt9 prints FT4 decodes.
+    CHECK(run_cli("encode \"K1ABC W9XYZ R-07\" --mode ft4 --freq 1234 --dt 0.3 --snr -10 -o " + wav).empty());
+    CHECK_HAS(run_cli("decode --mode ft4 " + wav), " 0.3 1234 +  K1ABC W9XYZ R-07");
+    // FT4 audio is not FT8.
+    CHECK(run_cli("decode " + wav).find("K1ABC") == std::string::npos);
+    // ft4code's tones, ramps included, sent as they are.
+    const auto vectors = test::ft4code_vectors();
+    REQUIRE(!vectors.empty());
+    const auto& v = vectors[size_t(6)];
+    CHECK(run_cli("encode --mode ft4 --tones " + v.tones + " --snr -10 -o " + wav).empty());
+    CHECK_HAS(run_cli("decode --mode ft4 " + wav), "+  " + v.decoded);
+    // Over two fading paths at a good SNR.
+    CHECK(run_cli("encode \"CQ DL1ABC JO31\" --mode ft4 --fading 1,2 --snr 0 --seed 3 -o " + wav).empty());
+    CHECK_HAS(run_cli("decode --mode ft4 " + wav), "+  CQ DL1ABC JO31");
+    CHECK_HAS(run_cli("encode --mode ft4 --tones 0123 -o " + wav), "--tones wants");
+    std::remove(wav.c_str());
 }

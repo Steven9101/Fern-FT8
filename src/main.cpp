@@ -45,7 +45,9 @@ void usage() {
                  "      Write a 15 s FT8 slot (7.5 s for FT4) with one transmission of\n"
                  "      MESSAGE (default 1500 Hz, DT 0, 12000 Hz), with white noise at SNR\n"
                  "      DB in 2500 Hz when --snr is given. --tones DIGITS in place of the\n"
-                 "      message sends tones as ft8code or ft4code prints them.\n"
+                 "      message sends tones as ft8code or ft4code prints them; --fading\n"
+                 "      HZ,MS sends it over two fading paths, HZ of Doppler spread, the\n"
+                 "      second MS later.\n"
                  "  fern-ft8 noise [--mode ft8|ft4] [--minutes M] [--depth N] [--seed S] [--rate R]\n"
                  "                 [--silence]\n"
                  "      Feed M minutes (default 60) of white Gaussian noise, or digital\n"
@@ -240,10 +242,49 @@ bool parse_tones(const std::string& text, Mode mode, std::vector<uint8_t>& tones
     return tones.size() == size_t(mode == Mode::Ft4 ? ft4::kSymbolCount : kSymbolCount);
 }
 
+// The complex gain of one propagation path: Gaussian, with a Gaussian
+// Doppler spectrum whose width (two standard deviations) is spread_hz, the
+// CCIR's definition of frequency spread that [QEX] section 8 uses; mean power
+// one. White Gaussian samples at 200 Hz are smoothed by the matching
+// Gaussian in time and read at `rate` by linear interpolation.
+std::vector<std::complex<double>> path_gain(size_t n, double rate, double spread_hz, std::mt19937& rng) {
+    const double low_rate = 200.0;
+    // A Gaussian of standard deviation sigma_t in time has a power spectrum
+    // of standard deviation 1 / (2 sqrt(2) pi sigma_t).
+    const double sigma_t = low_rate / (2.0 * std::sqrt(2.0) * M_PI * 0.5 * spread_hz);  // in low-rate samples
+    const int half = int(std::ceil(4.0 * sigma_t));
+    std::vector<double> taps(size_t(2 * half + 1));
+    double energy = 0;
+    for (int i = -half; i <= half; ++i) {
+        taps[size_t(i + half)] = std::exp(-0.5 * i * i / (sigma_t * sigma_t));
+        energy += taps[size_t(i + half)] * taps[size_t(i + half)];
+    }
+    // Unit-power complex white noise through taps of unit energy.
+    for (double& t : taps)
+        t /= std::sqrt(energy);
+    std::normal_distribution<double> g(0.0, std::sqrt(0.5));
+    const size_t m = size_t(double(n) / rate * low_rate) + 2;
+    std::vector<std::complex<double>> white(m + taps.size());
+    for (auto& v : white)
+        v = std::complex<double>(g(rng), g(rng));
+    std::vector<std::complex<double>> slow(m);
+    for (size_t i = 0; i < m; ++i)
+        for (size_t j = 0; j < taps.size(); ++j)
+            slow[i] += white[i + j] * taps[j];
+    std::vector<std::complex<double>> out(n);
+    for (size_t i = 0; i < n; ++i) {
+        const double p = double(i) / rate * low_rate;
+        const size_t q = size_t(p);
+        out[i] = slow[q] + (p - double(q)) * (slow[q + 1] - slow[q]);
+    }
+    return out;
+}
+
 int cmd_encode(int argc, char** argv) {
     std::string text, out, tone_text;
     Mode mode = Mode::Ft8;
     double freq = 1500, dt = 0, rate = 12000;
+    double spread = 0, delay_ms = 0;
     double snr = std::nan("");
     unsigned seed = 1;
     for (int i = 0; i < argc; ++i) {
@@ -266,6 +307,9 @@ int cmd_encode(int argc, char** argv) {
             ;
         else if (a == "--tones" && (v = next()))
             tone_text = v;
+        else if (a == "--fading" && (v = next()) && std::sscanf(v, "%lf,%lf", &spread, &delay_ms) == 2 &&
+                 spread > 0 && spread <= 50 && delay_ms >= 0 && delay_ms <= 10)
+            ;
         else if (text.empty() && !a.empty() && a[0] != '-')
             text = a;
         else {
@@ -310,14 +354,30 @@ int cmd_encode(int argc, char** argv) {
     double amp = 0.3;
     if (!std::isnan(snr))
         amp = std::sqrt(std::pow(10.0, snr / 10.0) * 4.0 * 2500.0 * sigma * sigma / rate);
-    if (ft4) {
-        ft4::Tones t{};
-        std::copy(tones.begin(), tones.end(), t.begin());
-        add_ft4_waveform(t, rate, freq, ft4::kStartSeconds + dt, 1.0f, wave.data(), n);
-    } else {
-        Tones t{};
-        std::copy(tones.begin(), tones.end(), t.begin());
-        add_ft8_waveform(t, rate, freq, kStartSeconds + dt, 1.0f, wave.data(), n);
+    auto transmit = [&](double start, std::vector<std::complex<float>>& to) {
+        if (ft4) {
+            ft4::Tones t{};
+            std::copy(tones.begin(), tones.end(), t.begin());
+            add_ft4_waveform(t, rate, freq, start, 1.0f, to.data(), n);
+        } else {
+            Tones t{};
+            std::copy(tones.begin(), tones.end(), t.begin());
+            add_ft8_waveform(t, rate, freq, start, 1.0f, to.data(), n);
+        }
+    };
+    const double start = (ft4 ? ft4::kStartSeconds : kStartSeconds) + dt;
+    transmit(start, wave);
+    if (spread > 0) {
+        // Two paths of equal mean power, the second delay_ms later, each
+        // with its own fading gain: the channels of [QEX] Table 6.
+        std::vector<std::complex<float>> late(n);
+        transmit(start + delay_ms / 1000.0, late);
+        std::mt19937 fade_rng(seed * 7919u + 1u);
+        const auto g1 = path_gain(n, rate, spread, fade_rng);
+        const auto g2 = path_gain(n, rate, spread, fade_rng);
+        for (size_t i = 0; i < n; ++i)
+            wave[i] = std::complex<float>((g1[i] * std::complex<double>(wave[i]) +
+                                           g2[i] * std::complex<double>(late[i])) * std::sqrt(0.5));
     }
     std::mt19937 rng(seed);
     std::normal_distribution<double> g(0.0, sigma);
