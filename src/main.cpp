@@ -91,6 +91,21 @@ bool slot_time_from_name(const std::string& path, int64_t& utc, int& hhmmss) {
     return false;
 }
 
+// When the file of a name's time starts. WSJT-X names a file by the whole
+// seconds of its slot, so an FT4 slot of :07.5, :22.5, :37.5 or :52.5 is
+// named :07, :22, :37 or :52: half a second early, which would put every DT
+// half a second low and lose those near the -1 s edge. A time within a
+// second before a 7.5 s boundary is that boundary's slot.
+int64_t slot_start_us(int64_t utc, Mode mode) {
+    const int64_t ms = utc * 1000;
+    if (mode == Mode::Ft4) {
+        const int64_t past = ((ms % 7500) + 7500) % 7500;
+        if (past != 0 && 7500 - past <= 1000)
+            return (ms + 7500 - past) * 1000;
+    }
+    return ms * 1000;
+}
+
 // "ft8" or "ft4" into mode; false for anything else.
 bool parse_mode(const char* text, Mode& mode) {
     if (!text)
@@ -122,8 +137,8 @@ void apply_tune(ChannelConfig& cfg, const std::string& tune) {
 
 // Real audio at `rate` to complex baseband with audio 2000 Hz at 0 Hz, as a
 // FernSDR channel would deliver it, then optionally resampled to rate_test.
-std::vector<SlotResult> decode_audio(const Audio& audio, int64_t utc, const Options& o, CallsignHashTable& hashes,
-                                     double* cpu) {
+std::vector<SlotResult> decode_audio(const Audio& audio, int64_t start_us, const Options& o,
+                                     CallsignHashTable& hashes, double* cpu) {
     const double offset = 2000.0;
     std::vector<std::complex<float>> x(audio.samples.size());
     for (size_t i = 0; i < x.size(); ++i) {
@@ -150,7 +165,7 @@ std::vector<SlotResult> decode_audio(const Audio& audio, int64_t utc, const Opti
     const size_t frame = 4096;
     for (size_t i = 0; i < x.size(); i += frame) {
         const size_t n = std::min(frame, x.size() - i);
-        const int64_t us = utc * 1000000 + int64_t(std::llround(double(i) * 1e6 / rate));
+        const int64_t us = start_us + int64_t(std::llround(double(i) * 1e6 / rate));
         ch.push(&x[i], n, i, us, 0);
         for (auto& r : ch.decode_ready())
             results.push_back(std::move(r));
@@ -209,7 +224,7 @@ int cmd_decode(int argc, char** argv) {
         if (!named)
             hhmmss = 0;
         double cpu = 0;
-        const auto results = decode_audio(audio, utc, o, hashes, &cpu);
+        const auto results = decode_audio(audio, slot_start_us(utc, o.mode), o, hashes, &cpu);
         for (const SlotResult& r : results) {
             for (const Decode& d : r.decodes)
                 print_decode(d, results.size() == 1 ? hhmmss : -1, o.verbose);

@@ -555,3 +555,17 @@ TEST(command_line_writes_and_decodes_ft4_slots) {
     CHECK_HAS(run_cli("encode --mode ft4 --tones 0123 -o " + wav), "--tones wants");
     std::remove(wav.c_str());
 }
+
+// WSJT-X names a file by its slot's whole seconds, so a slot that starts at
+// :22.5 is saved as _HHMM22: read as :22, every DT would come out half a
+// second low and one sent at -0.8 s would not be found at all.
+TEST(command_line_reads_an_ft4_slot_named_by_whole_seconds) {
+    const std::string half = "build/test/251005_120022.wav";
+    const std::string whole = "build/test/251005_120030.wav";
+    CHECK(run_cli("encode \"CQ DL1ABC JO31\" --mode ft4 --dt -0.8 --snr -10 -o " + half).empty());
+    CHECK_HAS(run_cli("decode --mode ft4 " + half), "120022 -10 -0.8 1500 +  CQ DL1ABC JO31");
+    CHECK(run_cli("encode \"CQ DL1ABC JO31\" --mode ft4 --dt -0.8 --snr -10 -o " + whole).empty());
+    CHECK_HAS(run_cli("decode --mode ft4 " + whole), "120030 -10 -0.8 1500 +  CQ DL1ABC JO31");
+    std::remove(half.c_str());
+    std::remove(whole.c_str());
+}
