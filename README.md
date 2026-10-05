@@ -53,7 +53,9 @@ fern-ft8 decode FILE.wav... [--mode ft8|ft4] [--depth 1|2|3] [--rate-test R] [--
 ```
 
 Decodes 15 s FT8 slots, or with `--mode ft4` 7.5 s FT4 slots, of real audio
-(a WAV starting at the slot, as WSJT-X saves them) and prints one line per
+(a WAV starting at the slot, as WSJT-X saves them, named by the slot's
+time; a name off the slot grid is read as the slot the file starts, as jt9
+reads every file) and prints one line per
 decode as `jt9` does: `HHMMSS SNR DT FREQ ~  MESSAGE`, with `+` in place of
 `~` for FT4. The audio is turned into complex baseband
 around 2000 Hz and goes through the same channel code as live input;

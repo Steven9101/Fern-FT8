@@ -566,6 +566,11 @@ TEST(command_line_reads_an_ft4_slot_named_by_whole_seconds) {
     CHECK_HAS(run_cli("decode --mode ft4 " + half), "120022 -10 -0.8 1500 +  CQ DL1ABC JO31");
     CHECK(run_cli("encode \"CQ DL1ABC JO31\" --mode ft4 --dt -0.8 --snr -10 -o " + whole).empty());
     CHECK_HAS(run_cli("decode --mode ft4 " + whole), "120030 -10 -0.8 1500 +  CQ DL1ABC JO31");
+    // A time off the grid names a file that starts a slot, as jt9 reads it.
+    const std::string off = "build/test/251005_120002.wav";
+    CHECK(run_cli("encode \"CQ DL1ABC JO31\" --mode ft4 --dt 0.4 --snr -10 -o " + off).empty());
+    CHECK_HAS(run_cli("decode --mode ft4 " + off), "120002 -10  0.4 1500 +  CQ DL1ABC JO31");
     std::remove(half.c_str());
     std::remove(whole.c_str());
+    std::remove(off.c_str());
 }

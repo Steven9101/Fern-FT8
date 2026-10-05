@@ -91,19 +91,22 @@ bool slot_time_from_name(const std::string& path, int64_t& utc, int& hhmmss) {
     return false;
 }
 
-// When the file of a name's time starts. WSJT-X names a file by the whole
-// seconds of its slot, so an FT4 slot of :07.5, :22.5, :37.5 or :52.5 is
-// named :07, :22, :37 or :52: half a second early, which would put every DT
-// half a second low and lose those near the -1 s edge. A time within a
-// second before a 7.5 s boundary is that boundary's slot.
+// When the file of a name's time starts: always on a slot boundary, as jt9
+// takes every file to start one. WSJT-X names a file by the whole seconds
+// of its slot, so an FT4 slot of :07.5, :22.5, :37.5 or :52.5 is named :07,
+// :22, :37 or :52, half a second early: a time within a second before a
+// boundary is that boundary's slot. Any other time off the grid, such as the
+// 6 s slots of FT4's first test runs in WSJT-X's samples, names a file that
+// starts a slot anyway, and goes back to the boundary before it.
 int64_t slot_start_us(int64_t utc, Mode mode) {
+    const int64_t period = mode == Mode::Ft4 ? 7500 : 15000;
     const int64_t ms = utc * 1000;
-    if (mode == Mode::Ft4) {
-        const int64_t past = ((ms % 7500) + 7500) % 7500;
-        if (past != 0 && 7500 - past <= 1000)
-            return (ms + 7500 - past) * 1000;
-    }
-    return ms * 1000;
+    const int64_t past = ((ms % period) + period) % period;
+    if (past == 0)
+        return ms * 1000;
+    if (mode == Mode::Ft4 && period - past <= 1000)
+        return (ms + period - past) * 1000;
+    return (ms - past) * 1000;
 }
 
 // "ft8" or "ft4" into mode; false for anything else.

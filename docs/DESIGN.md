@@ -262,9 +262,12 @@ tests with a cross compiler and runs them under qemu-user.
 - A priori decoding (the CQ hypothesis and repeat-caller lists of [QEX]
   section 6) is not implemented; the decoder never uses a priori
   information.
-- WSPR and SuperFox are not decoded. FT4 is, but has been measured on
-  synthetic signals and simulated fading only: no FT4 recordings from the
-  air were at hand. A priori decoding is not used for FT4 either.
+- WSPR and SuperFox are not decoded. FT4 is measured on synthetic signals
+  and simulated fading; from the air, only WSJT-X's sample slot
+  `000000_000002.wav` (an RTTY Roundup test of January 2019) was at hand,
+  where it decodes the same 19 messages as jt9 at depth 3, SNR within 2 dB
+  and DT within 0.2 s. The sample is not in this repository, as its licence
+  is not stated. A priori decoding is not used for FT4 either.
 - Candidates are processed one at a time; the belief propagation is vector
   code only across one candidate's four soft-bit sets, not across
   candidates.
