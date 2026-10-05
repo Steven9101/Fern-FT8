@@ -17,7 +17,10 @@
 #include <string>
 #include <vector>
 
+#include "ft4.h"
+#include "gfsk.h"
 #include "json.h"
+#include "message.h"
 #include "test.h"
 #include "wav.h"
 
@@ -167,6 +170,9 @@ TEST(module_decodes_a_recording_fed_as_frames_and_stops_when_told) {
     CHECK(hello["type"].string() == "hello");
     CHECK(hello["api"].number() == 2);
     CHECK(hello["kind"].string() == "decoder");
+    REQUIRE(hello["modes"].is_array() && hello["modes"].elements().size() == 2);
+    CHECK(hello["modes"].elements()[0].string() == "ft8");
+    CHECK(hello["modes"].elements()[1].string() == "ft4");
     s.send(kOpen);
     CHECK(s.next(15000)["type"].string() == "ready");
 
@@ -252,4 +258,66 @@ TEST(module_refuses_a_bad_open_and_a_bad_frame) {
         s.frames = -1;
         CHECK(s.wait_exit(5000) == 0);
     }
+}
+
+TEST(module_decodes_ft4_channels_on_their_own_slots) {
+    // Two channels: FT8 on 20 m, which hears nothing, and FT4 at an odd
+    // rate, with a transmission in each of three 7.5 s slots.
+    Session s;
+    REQUIRE(s.pid > 0);
+    CHECK(s.next(5000)["type"].string() == "hello");
+    const double rate = 7031.25;
+    s.send(R"({"type":"open","channels":[)"
+           R"({"id":"20m-ft8-14074","band":"20m","mode":"ft8","dial":14074000,"rate":12000,"offset":2000,"width":4000,"format":"cf32"},)"
+           R"({"id":"20m-ft4-14080","band":"20m","mode":"ft4","dial":14080000,"rate":7031.25,"offset":2000,"width":4000,"format":"cf32"}]})");
+    CHECK(s.next(15000)["type"].string() == "ready");
+
+    const int64_t first_slot_ms = 1790604000000;  // a multiple of 7.5 s
+    const char* texts[3] = {"CQ K1ABC FN42", "K1ABC W9XYZ -12", "W9XYZ K1ABC R-12"};
+    const double seconds = 25.0;
+    std::vector<std::complex<float>> x(size_t(seconds * rate));
+    for (int k = 0; k < 3; ++k) {
+        const auto p = fern::ft8::pack_message(texts[k]);
+        REQUIRE(p.has_value());
+        fern::ft8::add_ft4_waveform(fern::ft8::ft4::tones_of(fern::ft8::ft4::encode_codeword(*p)), rate,
+                                    1000.0 + 300.0 * k - 2000.0, 1.0 + 7.5 * k + fern::ft8::ft4::kStartSeconds, 0.5f,
+                                    x.data(), x.size());
+    }
+    // The stream starts 1 s before the first slot.
+    const int64_t start_us = (first_slot_ms - 1000) * 1000;
+    const size_t per_frame = 1757;
+    for (size_t at = 0; at < x.size(); at += per_frame) {
+        const std::vector<std::complex<float>> part(x.begin() + long(at),
+                                                    x.begin() + long(std::min(x.size(), at + per_frame)));
+        REQUIRE(s.frame(1, at == 0 ? 2 : 0, at, start_us + int64_t(std::llround(double(at) * 1e6 / rate)), part));
+    }
+    int decodes = 0;
+    for (int i = 0; i < 200 && decodes < 3; i++) {
+        const Json event = s.next(10000);
+        if (event.kind() == Json::Kind::Null) break;
+        if (event["type"].string() != "decode") continue;
+        CHECK(event["channel"].string() == "20m-ft4-14080");
+        const int64_t time = static_cast<int64_t>(event["time"].number());
+        CHECK((time - first_slot_ms) % 7500 == 0);
+        const int k = static_cast<int>((time - first_slot_ms) / 7500);
+        REQUIRE(k >= 0 && k < 3);
+        CHECK(event["message"].string() == texts[k]);
+        CHECK(std::fabs(event["freq"].number() - (1000.0 + 300.0 * k)) < 1.0);
+        CHECK(std::fabs(event["dt"].number()) < 0.1);
+        CHECK(event["quality"].string() == "bp");
+        decodes++;
+    }
+    CHECK(decodes == 3);
+    s.send(R"({"type":"stop"})");
+    CHECK(s.wait_exit(5000) == 0);
+}
+
+TEST(module_refuses_a_mode_it_does_not_decode) {
+    Session s;
+    REQUIRE(s.pid > 0);
+    s.next(5000);
+    s.send(R"({"type":"open","channels":[{"id":"x","mode":"wspr","rate":12000,"format":"cf32"}]})");
+    const Json error = s.next(5000);
+    CHECK(error["type"].string() == "error");
+    CHECK(s.wait_exit(5000) == 3);
 }

@@ -246,10 +246,10 @@ private:
 
 int describe_module() {
     std::printf("{\"api\":2,\"id\":\"ft8\",\"name\":\"Fern-FT8\",\"version\":\"" FERN_FT8_VERSION
-                "\",\"kind\":\"decoder\",\"modes\":[\"ft8\"],\"settings\":[{\"key\":\"depth\","
+                "\",\"kind\":\"decoder\",\"modes\":[\"ft8\",\"ft4\"],\"settings\":[{\"key\":\"depth\","
                 "\"type\":\"number\",\"label\":\"Depth\",\"min\":1,\"max\":3,\"default\":2,"
                 "\"help\":\"How hard each slot is searched: 1 is quickest, 3 finds a few more weak signals "
-                "for about a third more CPU\"}]}\n");
+                "for about a third more CPU in FT8 and twice as much in FT4\"}]}\n");
     return 0;
 }
 
@@ -261,7 +261,7 @@ int run_module(int argc, char** argv) {
     ::signal(SIGPIPE, SIG_IGN);
     Events events;
     events.send("{\"type\":\"hello\",\"api\":2,\"id\":\"ft8\",\"version\":\"" FERN_FT8_VERSION
-                "\",\"kind\":\"decoder\",\"modes\":[\"ft8\"]}");
+                "\",\"kind\":\"decoder\",\"modes\":[\"ft8\",\"ft4\"]}");
 
     // The open command, before anything else.
     Lines lines;
@@ -303,11 +303,14 @@ int run_module(int argc, char** argv) {
         config.offset_hz = c["offset"].number(2000);
         config.width_hz = c["width"].number(4000);
         config.depth = depth;
+        // A channel without a mode is FT8, as this module's id names it.
         const std::string mode = c.has("mode") ? c["mode"].string() : "ft8";
-        if (id.empty() || id.size() > 64 || c["format"].string() != "cf32" || mode != "ft8" ||
+        config.mode = mode == "ft4" ? Mode::Ft4 : Mode::Ft8;
+        if (id.empty() || id.size() > 64 || c["format"].string() != "cf32" || (mode != "ft8" && mode != "ft4") ||
             !(config.rate > 0 && config.rate < 1e6) || !std::isfinite(config.offset_hz) ||
             !(config.width_hz > 0 && config.width_hz <= 48000)) {
-            fatal(events, "invalid", "channel '" + id + "' is not an FT8 channel of cf32 samples this decoder can take");
+            fatal(events, "invalid",
+                  "channel '" + id + "' is not an FT8 or FT4 channel of cf32 samples this decoder can take");
             return 3;
         }
         try {
