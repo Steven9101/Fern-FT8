@@ -304,12 +304,12 @@ int cmd_encode(int argc, char** argv) {
         else if (a == "-o" && (v = next()))
             out = v;
         else if (a == "--mode" && (v = next()) && parse_mode(v, mode))
-            ;
+            continue;
         else if (a == "--tones" && (v = next()))
             tone_text = v;
         else if (a == "--fading" && (v = next()) && std::sscanf(v, "%lf,%lf", &spread, &delay_ms) == 2 &&
                  spread > 0 && spread <= 50 && delay_ms >= 0 && delay_ms <= 10)
-            ;
+            continue;
         else if (text.empty() && !a.empty() && a[0] != '-')
             text = a;
         else {
@@ -464,7 +464,7 @@ int cmd_noise(int argc, char** argv) {
         if (a == "--minutes" && (v = next()))
             minutes = std::atof(v);
         else if (a == "--mode" && (v = next()) && parse_mode(v, mode))
-            ;
+            continue;
         else if (a == "--depth" && (v = next()))
             depth = std::atoi(v);
         else if (a == "--seed" && (v = next()))
@@ -530,8 +530,10 @@ int cmd_bench(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--depth" && i + 1 < argc)
             depth = std::atoi(argv[++i]);
-        else if (a == "--mode" && i + 1 < argc && parse_mode(argv[i + 1], only_mode))
-            only = ++i > 0;
+        else if (a == "--mode" && i + 1 < argc && parse_mode(argv[i + 1], only_mode)) {
+            only = true;
+            ++i;
+        }
         else if (a == "--tune" && i + 1 < argc)
             tune = argv[++i];
         else
