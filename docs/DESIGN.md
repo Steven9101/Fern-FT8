@@ -136,6 +136,89 @@ looks again. Depth 1 runs two passes and no OSD.
     signals (10 per step, `fern-ft8 encode` at 12000 Hz) the estimate is
     within 1 dB of the truth from -20 to +20 dB.
 
+## FT4
+
+FT4 ([QEX] sections 4 and 5) sends the same 174-bit codeword as FT8, its
+payload scrambled first, as 87 symbols of 4-GFSK (BT = 1) 48 ms long and
+20.833 Hz apart, framed by four different 4x4 Costas arrays and a ramp
+symbol at each end: 105 symbols, 5.04 s, in 7.5 s slots. A channel opened
+as FT4 runs `src/ft4_decoder.cpp`, the pipeline above with FT4's numbers;
+what differs, and why. The measurements are on synthetic slots from
+`fern-ft8 encode --mode ft4` (random messages, 300 to 2700 Hz, DT -0.5 to
+0.8 s), 200 per SNR unless the text says otherwise, at depth 2.
+
+- **Grid and slot.** FT4 channels are resampled to 16000/3 samples a
+  second: 256 a symbol, a power of two again, 40000 a slot, and 187.5 us a
+  sample, exact in binary, so the UTC alignment of the FT8 grid carries
+  over. The resampler keeps at most 2400 Hz either side of the channel's
+  centre, so FernSDR's 4000 Hz channels are whole. A slot is decoded with
+  0.75 s before its start to 6.75 s after, in time to show it before the
+  slot ends. DT is searched from -1.0 to +1.0 s, the range `jt9` decodes
+  (`docs/PROTOCOL-SOURCES.md`).
+
+- **Candidates.** One-symbol windows zero-padded to 512, every 12 ms, give
+  half-tone bins of 10.42 Hz; a candidate scores the power of the 16 Costas
+  tones against that of the other 3 tones of the same symbols, over all four
+  arrays or three. Noise has 4 of 16 Costas tones right by chance, so a
+  candidate needs 7 (6 at depth 3) before it is looked at closely: 5 cost a
+  quarter more CPU and decoded nothing more.
+
+- **Time and frequency.** The spectrogram leaves the start up to 10 ms and
+  tone 0 up to 6 Hz off (90th percentiles at -17 dB). A few hertz hardly
+  change a 48 ms tone's power, so after a search in time on the symbols'
+  powers the frequency is searched with the four symbols of each Costas
+  array added coherently, which is four times as sharp. The phases of
+  neighbouring symbols then refine both as for FT8 (delays to +-8 ms); then
+  a search coherent over all 103 symbols with the tones decided: a
+  frequency error delta turns each symbol's correlation by 2 pi delta T
+  from one symbol to the next, a start error tau by 2 pi 20.833 Hz (k - 1.5)
+  tau for tone k, and the delta and tau that line up all 103 best are found
+  to 0.01 Hz and 0.06 ms within +-0.5 Hz and +-1 ms. At -17 dB the median
+  frequency error fell from 0.22 to 0.01 Hz and the start's from 0.7 to
+  0.4 ms, and the decode rate rose from 0.505 to 0.565. Last, the symbol
+  windows, 16 baseband samples of 3 ms, would start up to 1.5 ms off the
+  symbols, 3 % of one, which with the start known exactly cost 0.1 of
+  decode probability at -17 dB; the baseband is cut again from the slot's
+  spectrum with the fraction of a sample as a phase ramp across the bins.
+
+- **Soft bits.** [QEX] section 6 has blocks of 1, 2 and 4 symbols for FT4.
+  With the start and frequency this precise, longer blocks gain where the
+  channel keeps its phase, and single symbols are what fast fading leaves.
+  The four lanes hold blocks of 6 symbols, blocks of 4 that start 2 symbols
+  into each group of 29 (so that their edges fall where the others' do
+  not), single symbols, and the relative set of FT8. A block of 6 has 4096
+  tone sequences; their sums come from two halves of 64 partial sums, the
+  largest power is kept per half, and square roots are taken of the maxima
+  only. Single symbols keep the powers themselves (square-law detection):
+  where a symbol's phase is lost to fading the power is the better measure.
+  OSD runs on all three block sets (in the first two columns below on the
+  first two). 50 % thresholds against the paper's blocks, 100 slots per
+  step, depth 2, on white noise and on the two-path channels of [QEX]
+  Table 6 (`fern-ft8 encode --fading`, `scripts/threshold.py --fading`):
+
+  | channel | blocks of 4, 2, 1 | 6, 4 shifted, 2 | 6, 4 shifted, 1, OSD on all three |
+  |---|---|---|---|
+  | white noise | -17.00 dB | -17.50 dB | -17.37 dB |
+  | 0.5 Hz spread, 1 ms | -14.50 dB | -15.14 dB | -15.10 dB |
+  | 1 Hz spread, 2 ms | -13.92 dB | -14.20 dB | -14.16 dB |
+  | 10 Hz spread, 3 ms | -9.72 dB | -8.79 dB | -10.92 dB |
+
+- **OSD.** With 16 Costas tones the power ratio says less than FT8's (99 %
+  of noise candidates stay below 3.5, against 2.82), so it does not screen
+  OSD's results well. An OSD codeword is kept with at most 31 hard errors
+  (29 when 8 to 10 Costas tones were right), and only when its hard errors
+  against all four soft-bit sets add up to 145 or fewer: none of the 1048
+  OSD codewords from white noise that unpacked did, 91 % of the true ones at
+  -18 to -16.5 dB did. The all-zero codeword, which passes every check and
+  the CRC and is what a steady carrier on tone 0 demodulates to, is never
+  taken.
+
+- **Subtraction and SNR.** The gain is smoothed over 4 symbols (192 ms),
+  twice; a noise-free signal is subtracted to 78 dB below itself. The noise
+  comes from Hann windows of two symbols (10.42 Hz bins), kept over
+  +-146 Hz; the SNR estimate is within 0.4 dB of the truth from -16 to
+  +30 dB.
+
 ## Callsign hashes
 
 One `CallsignHashTable` serves all channels and slots: a call heard on 40 m
@@ -147,19 +230,21 @@ call with the same hash replaces an earlier one. A mutex guards it.
 
 ## Threads
 
-A `Channel` (and its `SlotDecoder`) is used by one thread at a time;
-channels can decode on different threads at once. Shared state is the hash
-table (locked), FFT plans (built once under a lock, then read only) and
-static tables (initialised once, thread-safe by C++11). The tests run two
-channels on two threads with one table, also under ThreadSanitizer.
+A `Channel` (and its slot decoder) is used by one thread at a time;
+channels can decode on different threads at once, FT8 and FT4 alike. Shared
+state is the hash table (locked), FFT plans (built once under a lock, then
+read only) and static tables (initialised once, thread-safe by C++11). The
+tests run two channels on two threads with one table, and an FT8 and an FT4
+channel at once, also under ThreadSanitizer.
 
 ## Vector code
 
 Every vector path does exactly the scalar arithmetic: the same operations in
 the same order, and the build uses `-ffp-contract=off` so that no multiply
 and add fuse. Decodes are therefore identical at every level, which the
-tests check on real recordings (`decodes_do_not_depend_on_the_simd_level`),
-and each kernel is checked against its scalar form bit for bit.
+tests check on real recordings (`decodes_do_not_depend_on_the_simd_level`)
+and on a busy FT4 slot, and each kernel is checked against its scalar form
+bit for bit.
 
 - Belief propagation runs the four soft-bit sets in the four 32-bit lanes of
   GCC's vector extensions: SSE2 on x86-64 and NEON on aarch64, both always
@@ -177,7 +262,9 @@ tests with a cross compiler and runs them under qemu-user.
 - A priori decoding (the CQ hypothesis and repeat-caller lists of [QEX]
   section 6) is not implemented; the decoder never uses a priori
   information.
-- FT4, WSPR and SuperFox are not decoded.
+- WSPR and SuperFox are not decoded. FT4 is, but has been measured on
+  synthetic signals and simulated fading only: no FT4 recordings from the
+  air were at hand. A priori decoding is not used for FT4 either.
 - Candidates are processed one at a time; the belief propagation is vector
   code only across one candidate's four soft-bit sets, not across
   candidates.

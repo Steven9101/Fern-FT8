@@ -45,7 +45,7 @@ what is its own:
 | the 105 symbols R S1 A S2 B S3 C S4 R, R a ramp symbol of tone 0, three groups of 29 data symbols | [QEX] section 4 | `src/ft4.h`, `src/ft4.cpp` |
 | 4-GFSK, h = 1, T = 0.048 s (so 20.833 Hz between tones), BT = 1 | [QEX] section 5, Table 4, equation 3 | `src/gfsk.cpp` |
 | raised-cosine ramps over the whole 48 ms of each ramp symbol | [QEX] section 5 | `src/gfsk.cpp` |
-| block detection over 1, 2 and 4 symbols | [QEX] section 6 | `src/ft4_decoder.cpp` |
+| noncoherent block detection | [QEX] section 6, which uses blocks of 1, 2 and 4 symbols for FT4; Fern-FT8 uses 6, 4 and 1 by measurement (`docs/DESIGN.md`) | `src/ft4_decoder.cpp` |
 
 Both tables in the last row have changed since 2020. The changes were
 established without reading WSJT-X's code: by packing a message with each
@@ -103,12 +103,22 @@ literature:
 - belief propagation (min-sum) and ordered statistics decoding: S. Lin and
   D. J. Costello, "Error Control Coding", 2nd ed., 2004;
 - subtraction of decoded signals with a time-varying complex gain: [QEX]
-  section 6.
+  section 6;
+- the fading test channels (`fern-ft8 encode --fading`): two independently
+  fading paths of equal mean power and equal Doppler spread with a delay
+  between them, as [QEX] section 8 describes its simulations and Table 6
+  gives their parameters, after its reference [12], ITU-R F.1487, which
+  defines the spread as twice the standard deviation of a Gaussian Doppler
+  spectrum.
 
 The frequency and time refinement from symbol phases, the spectrogram
 pre-check of candidates, the acceptance rules for OSD results, the noise
-estimate and the four-lane belief propagation are Fern-FT8's own; the
-measurements behind them are in `docs/DESIGN.md`.
+estimate and the four-lane belief propagation are Fern-FT8's own, and so
+are, for FT4, the frequency search coherent over each Costas array, the
+refinement coherent over the whole transmission, the realignment of the
+baseband to the symbols, the choice of block lengths and the screening of
+OSD results against all four soft-bit sets; the measurements behind them
+are in `docs/DESIGN.md`.
 
 ## Test data
 

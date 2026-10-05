@@ -4,7 +4,7 @@
 #   make                 build/libfernft8.a and build/fern-ft8
 #   make test            unit tests, golden decodes and command line tests
 #   make test-asan       the unit tests under ASan and UBSan
-#   make bench           CPU per busy and per quiet slot, single thread
+#   make bench           CPU per busy and per quiet FT8 and FT4 slot, single thread
 #   make package [ARCH=x86_64|aarch64|armhf]
 #                        dist/ft8-VERSION-linux-ARCH.fernmod, static, for
 #                        FernSDR's Modules page or fernsdr --install-module
