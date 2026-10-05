@@ -45,6 +45,7 @@ what is its own:
 | the 105 symbols R S1 A S2 B S3 C S4 R, R a ramp symbol of tone 0, three groups of 29 data symbols | [QEX] section 4 | `src/ft4.h`, `src/ft4.cpp` |
 | 4-GFSK, h = 1, T = 0.048 s (so 20.833 Hz between tones), BT = 1 | [QEX] section 5, Table 4, equation 3 | `src/gfsk.cpp` |
 | raised-cosine ramps over the whole 48 ms of each ramp symbol | [QEX] section 5 | `src/gfsk.cpp` |
+| block detection over 1, 2 and 4 symbols | [QEX] section 6 | `src/ft4_decoder.cpp` |
 
 Both tables in the last row have changed since 2020. The changes were
 established without reading WSJT-X's code: by packing a message with each

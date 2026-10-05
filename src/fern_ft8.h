@@ -6,6 +6,7 @@
 //
 //   CallsignHashTable hashes;                  // one for all channels
 //   ChannelConfig cfg;                          // per channel in "open"
+//   cfg.mode = Mode::Ft8 or Mode::Ft4;          // the channel's "mode"
 //   cfg.rate = rate; cfg.offset_hz = offset; cfg.width_hz = width;
 //   cfg.depth = settings depth;
 //   Channel ch(cfg, &hashes);
@@ -14,8 +15,9 @@
 //       for (const Decode& d : r.decodes) ...          // one "decode" event
 //
 // A frame's header maps onto push() as it is: its sample index, its UTC time
-// in microseconds and its flags (kFrameSamplesLost, kFrameClockSet). A Decode
-// carries what a "decode" event needs: slot_start_ms (time), freq_hz (freq),
+// in microseconds and its flags (kFrameSamplesLost, kFrameClockSet). FT8
+// channels decode 15 s slots, FT4 channels 7.5 s slots. A Decode carries
+// what a "decode" event needs: slot_start_ms (time), freq_hz (freq),
 // snr_db (snr), dt, message.text (message, at most 40 printable characters),
 // message.fields.de_call (call, empty when the sender was sent as a hash),
 // message.fields.grid (grid, 4 or 6 characters or empty),

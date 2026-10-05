@@ -5,12 +5,16 @@
 // the waveform, and whole decodes through a Channel.
 #include <cmath>
 #include <complex>
+#include <cstdio>
+#include <random>
 #include <string>
 #include <vector>
 
+#include "fern_ft8.h"
 #include "ft4.h"
 #include "gfsk.h"
 #include "message.h"
+#include "simd.h"
 #include "test.h"
 #include "vectors.h"
 
@@ -144,4 +148,332 @@ TEST(ft4_pulse_has_unit_area) {
     for (int i = -3000; i < 3000; ++i)
         area += gfsk_pulse((i + 0.5) / 1000.0, kFt4BT) / 1000.0;
     CHECK(std::fabs(area - 1.0) < 1e-6);
+}
+
+namespace {
+
+using cvec = std::vector<std::complex<float>>;
+
+struct Tx {
+    std::string text;
+    double audio_hz;  // tone 0 above the dial
+    double dt;
+    double snr_db;
+};
+
+// Complex baseband at `rate` with baseband 0 Hz at audio `offset`, covering
+// `seconds` from UTC `start_s`, with FT4 transmissions in the slot starting
+// at slot_s and white noise of unit power per sample, so that SNR is per
+// 2500 Hz.
+cvec make_ft4(const std::vector<Tx>& txs, double rate, double offset, double start_s, double seconds, double slot_s,
+              unsigned seed, bool noise = true) {
+    const size_t n = size_t(std::llround(seconds * rate));
+    cvec x(n);
+    for (const Tx& t : txs) {
+        const auto p = pack_message(t.text);
+        if (!p)
+            continue;
+        const double amp = std::sqrt(std::pow(10.0, t.snr_db / 10.0) * 2500.0 / rate);
+        add_ft4_waveform(ft4::tones_of(ft4::encode_codeword(*p)), rate, t.audio_hz - offset,
+                         slot_s - start_s + ft4::kStartSeconds + t.dt, float(amp), x.data(), n);
+    }
+    if (noise) {
+        std::mt19937 rng(seed);
+        std::normal_distribution<float> g(0.0f, float(std::sqrt(0.5)));
+        for (auto& v : x)
+            v += std::complex<float>(g(rng), g(rng));
+    }
+    return x;
+}
+
+ChannelConfig ft4_config(double rate, int depth = 2) {
+    ChannelConfig c;
+    c.mode = Mode::Ft4;
+    c.rate = rate;
+    c.depth = depth;
+    return c;
+}
+
+std::vector<SlotResult> run_to_end(Channel& ch, const cvec& x, double rate, double start_s, size_t frame = 3000) {
+    std::vector<SlotResult> out;
+    for (size_t i = 0; i < x.size(); i += frame) {
+        const size_t n = std::min(frame, x.size() - i);
+        ch.push(&x[i], n, i, int64_t(std::llround(start_s * 1e6 + double(i) * 1e6 / rate)), 0);
+        for (auto& r : ch.decode_ready())
+            out.push_back(std::move(r));
+    }
+    for (auto& r : ch.finish())
+        out.push_back(std::move(r));
+    return out;
+}
+
+const Decode* find(const std::vector<SlotResult>& rs, const std::string& text) {
+    for (const auto& r : rs)
+        for (const auto& d : r.decodes)
+            if (d.message.text == text)
+                return &d;
+    return nullptr;
+}
+
+size_t count_decodes(const std::vector<SlotResult>& rs) {
+    size_t n = 0;
+    for (const auto& r : rs)
+        n += r.decodes.size();
+    return n;
+}
+
+}  // namespace
+
+TEST(ft4_decodes_transmissions_with_their_frequency_time_and_snr) {
+    const double rate = 8000, offset = 2000;
+    const double slot = 7.5 * 4001;  // an odd slot: FT4 slots are 7.5 s apart
+    const std::vector<Tx> txs = {
+        {"CQ K1ABC FN42", 400.0, 0.0, -10},
+        {"K1ABC W9XYZ -12", 1234.5, 0.6, -13},
+        {"W9XYZ K1ABC R-12", 2600.3, -0.6, -6},
+        {"CQ DX DL1ABC JO31", 3500.0, 0.9, 0},
+        {"DL1ABC G4ABC RR73", 1800.0, -0.9, 10},
+    };
+    const cvec x = make_ft4(txs, rate, offset, slot - 1.0, 8.4, slot, 1);
+    CallsignHashTable hashes;
+    Channel ch(ft4_config(rate), &hashes);
+    const auto rs = run_to_end(ch, x, rate, slot - 1.0);
+    REQUIRE(rs.size() == 1);
+    CHECK_EQ(rs[0].slot_start_ms, int64_t(slot * 1000));
+    CHECK_EQ(count_decodes(rs), txs.size());
+    for (const Tx& t : txs) {
+        const Decode* d = find(rs, t.text);
+        REQUIRE(d != nullptr || (std::fprintf(stderr, "    missing %s\n", t.text.c_str()), false));
+        CHECK(d->mode == Mode::Ft4);
+        CHECK(std::fabs(d->freq_hz - t.audio_hz) < 0.5);
+        CHECK(std::fabs(d->dt - t.dt) < 0.01);
+        CHECK(std::abs(d->snr_db - int(t.snr_db)) <= 2);
+        CHECK_EQ(std::string(d->quality()), std::string("bp"));
+    }
+    const Decode* cq = find(rs, "CQ DX DL1ABC JO31");
+    REQUIRE(cq != nullptr);
+    CHECK_EQ(cq->message.fields.de_call, std::string("DL1ABC"));
+    CHECK_EQ(cq->message.fields.grid, std::string("JO31"));
+}
+
+TEST(ft4_round_trips_every_message_type) {
+    // One slot per type, each at -12 dB, through a 12 kHz channel.
+    const char* const messages[] = {
+        "TNX BOB 73 GL", "K1ABC RR73; W9XYZ <KH1/KH7Z> -08", "K1ABC W9XYZ 6A WI", "W9XYZ K1ABC R 17B EMA",
+        "123456789ABCDEF012", "CQ K1ABC FN42", "K1ABC W9XYZ R-09", "CQ G4ABC/P IO91", "K1ABC W9XYZ 579 WI",
+        "CQ PJ4/K1ABC", "<W9XYZ> PJ4/K1ABC RRR",
+    };
+    const double rate = 12000;
+    double slot = 7.5 * 20000;
+    for (const char* text : messages) {
+        CallsignHashTable hashes;
+        // The receiver has heard the hashed calls before.
+        hashes.remember("KH1/KH7Z", int64_t(slot));
+        hashes.remember("W9XYZ", int64_t(slot));
+        const cvec x = make_ft4({{text, 1500.0, 0.2, -12}}, rate, 2000, slot - 1.0, 8.4, slot, 2);
+        ChannelConfig cfg = ft4_config(rate);
+        cfg.unpack.contest_forms = true;
+        Channel ch(cfg, &hashes);
+        const auto rs = run_to_end(ch, x, rate, slot - 1.0);
+        if (!find(rs, text))
+            std::fprintf(stderr, "    missing %s\n", text);
+        CHECK(find(rs, text) != nullptr);
+        CHECK_EQ(count_decodes(rs), size_t(1));
+        slot += 7.5;
+    }
+}
+
+TEST(ft4_decodes_at_odd_and_low_rates_and_offsets) {
+    // Rates that are not whole numbers, and the edges of the DT range.
+    const double rates[] = {5859.375, 7031.25, 4000.0, 12000.0, 11718.75};
+    const double dts[] = {-0.95, -0.3, 0.0, 0.45, 0.95};
+    for (int i = 0; i < 5; ++i) {
+        const double rate = rates[i];
+        const double slot = 7.5 * (3001 + i);
+        const std::vector<Tx> txs = {{"CQ PJ4/K1ABC", 1500.0, dts[i], -12}, {"K1ABC W9XYZ RR73", 700.0, -dts[i], -12}};
+        const cvec x = make_ft4(txs, rate, 2000, slot - 1.3, 9.0, slot, 3 + unsigned(i));
+        Channel ch(ft4_config(rate), nullptr);
+        const auto rs = run_to_end(ch, x, rate, slot - 1.3);
+        for (const Tx& t : txs) {
+            const Decode* d = find(rs, t.text);
+            if (!d)
+                std::fprintf(stderr, "    rate %.3f DT %.2f: missing %s\n", rate, t.dt, t.text.c_str());
+            CHECK(d != nullptr);
+            if (d)
+                CHECK(std::fabs(d->dt - t.dt) < 0.01);
+        }
+    }
+}
+
+TEST(ft4_slots_follow_utc_across_a_stream) {
+    // A minute in one stream, a transmission in each 7.5 s slot.
+    const double rate = 8000, start = 900000.0 - 3.3;
+    cvec x(size_t(64 * rate));
+    for (int k = 0; k < 8; ++k) {
+        const double slot = 900000.0 + 7.5 * k;
+        const std::string text = "K1ABC W9XYZ " + std::string(k % 2 ? "R" : "") + "-0" + std::to_string(k + 1);
+        const cvec s = make_ft4({{text, 1000.0 + 100 * k, 0.1 * k - 0.3, -8}}, rate, 2000, start, 64, slot, 0, false);
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] += s[i];
+    }
+    std::mt19937 rng(3);
+    std::normal_distribution<float> g(0.0f, float(std::sqrt(0.5)));
+    for (auto& v : x)
+        v += std::complex<float>(g(rng), g(rng));
+    Channel ch(ft4_config(rate), nullptr);
+    const auto rs = run_to_end(ch, x, rate, start);
+    int found = 0;
+    for (const auto& r : rs) {
+        CHECK_EQ(r.slot_start_ms % 7500, int64_t(0));
+        const int k = int((r.slot_start_ms - 900000000) / 7500);
+        for (const auto& d : r.decodes) {
+            const std::string want = "K1ABC W9XYZ " + std::string(k % 2 ? "R" : "") + "-0" + std::to_string(k + 1);
+            CHECK_EQ(d.message.text, want);
+            CHECK(std::fabs(d.freq_hz - (1000.0 + 100 * k)) < 0.5);
+            ++found;
+        }
+    }
+    CHECK_EQ(found, 8);
+}
+
+TEST(ft4_overlapping_signals_decode_after_subtraction) {
+    // A weak signal 20 Hz from a strong one and 0.2 s later: found once the
+    // strong one is taken away.
+    const double rate = 8000, slot = 7.5 * 100;
+    const cvec x = make_ft4({{"CQ K1ABC FN42", 1500.0, 0.0, 10}, {"W9XYZ DL1ABC JO31", 1520.0, 0.2, -10}}, rate,
+                            2000, slot - 1.0, 9.0, slot, 6);
+    Channel ch(ft4_config(rate), nullptr);
+    const auto rs = run_to_end(ch, x, rate, slot - 1.0);
+    const Decode* strong = find(rs, "CQ K1ABC FN42");
+    const Decode* weak = find(rs, "W9XYZ DL1ABC JO31");
+    REQUIRE(strong != nullptr);
+    REQUIRE(weak != nullptr);
+    CHECK(weak->pass > strong->pass);
+}
+
+TEST(ft4_subtraction_leaves_little_of_a_strong_signal) {
+    // The residual of a +30 dB signal (no noise) after one pass.
+    const double rate = ft4::kInternalRate;
+    cvec x(size_t(ft4::kSlotSamples));
+    const auto p = pack_message("CQ K1ABC FN42");
+    REQUIRE(p.has_value());
+    add_ft4_waveform(ft4::tones_of(ft4::encode_codeword(*p)), rate, 300.25,
+                     ft4::kSlotLeadSeconds + ft4::kStartSeconds + 0.137, 1.0f, x.data(), x.size());
+    double before = 0;
+    for (const auto& v : x)
+        before += std::norm(v);
+    ft4::SlotDecoder dec;
+    DecodeSettings settings;
+    settings.depth = 1;
+    const auto ds = dec.decode(x, 0, x.size(), 2000.0, 0, settings, nullptr);
+    REQUIRE(ds.size() == 1);
+    double after = 0;
+    for (const auto& v : x)
+        after += std::norm(v);
+    const double db = 10 * std::log10(after / before);
+    std::fprintf(stderr, "    residual %.1f dB\n", db);
+    CHECK(db < -40);
+}
+
+TEST(ft4_weak_signals_decode_near_the_threshold) {
+    // At -15 dB nearly all decode, at -16.5 dB most do; WSJT-X's own
+    // threshold is near -17.5 dB ([QEX] Table 5).
+    const int trials = test::quick() ? 6 : 24;
+    const double rate = 8000;
+    for (const double snr : {-15.0, -16.5}) {
+        int ok = 0;
+        for (int i = 0; i < trials; ++i) {
+            const double slot = 7.5 * (5000 + i);
+            const std::string text = std::string(i % 2 ? "K1ABC" : "DL1ABC") + " W9XYZ " + (i % 3 ? "-1" : "R-0") +
+                                     std::to_string(i % 10);
+            const cvec x = make_ft4({{text, 400.0 + 97.0 * i, -0.4 + 0.05 * i, snr}}, rate, 2000, slot - 1.0, 8.4,
+                                    slot, 100 + unsigned(i) + unsigned(snr * -10));
+            Channel ch(ft4_config(rate), nullptr);
+            ok += find(run_to_end(ch, x, rate, slot - 1.0), text) != nullptr;
+        }
+        std::fprintf(stderr, "    %.1f dB: %d of %d\n", snr, ok, trials);
+        CHECK(ok >= trials * (snr > -16 ? 90 : 60) / 100);
+    }
+}
+
+TEST(ft4_no_decodes_from_white_noise_or_silence) {
+    // The long run is `fern-ft8 noise --mode ft4`; this is a few minutes.
+    const double rate = 8000;
+    const double minutes = test::quick() ? 1.0 : 4.0;
+    for (int depth : {1, 2, 3}) {
+        Channel ch(ft4_config(rate, depth), nullptr);
+        const cvec x = make_ft4({}, rate, 2000, 86400.0, minutes * 60, 0, 200 + unsigned(depth));
+        const auto rs = run_to_end(ch, x, rate, 86400.0);
+        CHECK(rs.size() >= size_t(minutes * 8) - 1);
+        for (const auto& r : rs)
+            for (const auto& d : r.decodes)
+                std::fprintf(stderr, "    false decode at depth %d: %s\n", depth, d.message.text.c_str());
+        CHECK_EQ(count_decodes(rs), size_t(0));
+    }
+    Channel ch(ft4_config(rate), nullptr);
+    const cvec zero(size_t(20 * rate));
+    CHECK_EQ(count_decodes(run_to_end(ch, zero, rate, 86400.0)), size_t(0));
+    // A steady carrier demodulates to the all-zero codeword, which passes
+    // the CRC; it is not a message.
+    cvec carrier = make_ft4({}, rate, 2000, 86400.0, 20.0, 0, 9);
+    for (size_t i = 0; i < carrier.size(); ++i)
+        carrier[i] += std::polar(3.0f, float(2 * M_PI * -500.0 * double(i) / rate));
+    Channel ch2(ft4_config(rate, 3), nullptr);
+    CHECK_EQ(count_decodes(run_to_end(ch2, carrier, rate, 86400.0)), size_t(0));
+}
+
+TEST(ft4_a_busy_slot_decodes) {
+    // 25 transmissions between 200 and 3000 Hz, -14 to +10 dB, overlapping
+    // in time and some in frequency.
+    const double rate = 12000, slot = 7.5 * 7000;
+    std::vector<Tx> txs;
+    std::mt19937 rng(17);
+    const char* calls[] = {"K1ABC", "W9XYZ", "DL1ABC", "JA1XYZ", "G4ABC", "VK2ABC", "PY2XYZ", "EA3ABC", "OH2XYZ"};
+    for (int i = 0; i < 25; ++i) {
+        const std::string text = std::string(calls[i % 9]) + " " + calls[(i + 1 + i / 9) % 9] + " " +
+                                 (i % 2 ? "R" : "") + "-" + std::to_string(10 + i);
+        txs.push_back({text, 200.0 + 2800.0 * double(rng() % 1000) / 1000.0, -0.5 + double(rng() % 1000) / 1000.0,
+                       -14.0 + 24.0 * double(rng() % 1000) / 1000.0});
+    }
+    const cvec x = make_ft4(txs, rate, 2000, slot - 1.0, 8.4, slot, 18);
+    ChannelConfig cfg = ft4_config(rate);
+    cfg.width_hz = 4400;
+    cfg.min_freq_hz = 200;
+    cfg.max_freq_hz = 4000;
+    Channel ch(cfg, nullptr);
+    const auto rs = run_to_end(ch, x, rate, slot - 1.0);
+    size_t found = 0;
+    for (const Tx& t : txs)
+        found += find(rs, t.text) != nullptr;
+    std::fprintf(stderr, "    %zu of %zu, %zu decodes\n", found, txs.size(), count_decodes(rs));
+    CHECK(found >= txs.size() - 2);
+    CHECK_EQ(count_decodes(rs), found);
+}
+
+TEST(ft4_decodes_do_not_depend_on_the_simd_level) {
+    const double rate = 12000, slot = 7.5 * 7100;
+    std::vector<Tx> txs;
+    for (int i = 0; i < 12; ++i)
+        txs.push_back({std::string(i % 2 ? "K1ABC" : "W9XYZ") + " DL1ABC " + std::to_string(-20 + i), 300.0 + 230.0 * i,
+                       -0.4 + 0.1 * i, -17.0 + 2.0 * i});
+    const cvec x = make_ft4(txs, rate, 2000, slot - 1.0, 8.4, slot, 19);
+    const SimdLevel saved = simd_level();
+    std::vector<std::string> runs;
+    for (SimdLevel level : {SimdLevel::Scalar, SimdLevel::Baseline, SimdLevel::Avx2}) {
+        set_simd_level(level);
+        Channel ch(ft4_config(rate, 3), nullptr);
+        std::string out;
+        char buf[160];
+        for (const auto& r : run_to_end(ch, x, rate, slot - 1.0))
+            for (const auto& d : r.decodes) {
+                std::snprintf(buf, sizeof buf, "%s %.6f %.6f %d %s\n", d.message.text.c_str(), d.freq_hz, d.dt,
+                              d.snr_db, d.quality());
+                out += buf;
+            }
+        runs.push_back(out);
+    }
+    set_simd_level(saved);
+    CHECK(!runs[0].empty());
+    CHECK(runs[0] == runs[1]);
+    CHECK(runs[0] == runs[2]);
 }

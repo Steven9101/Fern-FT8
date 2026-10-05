@@ -28,6 +28,7 @@
 #include "gfsk.h"
 #include "ldpc.h"
 #include "simd.h"
+#include "slot_dsp.h"
 
 namespace fern::ft8 {
 
@@ -67,14 +68,6 @@ struct Found {
     double f0 = 0;  // baseband hertz of tone 0
     double t0 = 0;  // start, seconds after buffer sample 0
 };
-
-inline cf cmul_conj(cf a, cf b) {  // a * conj(b)
-    return cf(a.real() * b.real() + a.imag() * b.imag(), a.imag() * b.real() - a.real() * b.imag());
-}
-
-inline cf cmul(cf a, cf b) {
-    return cf(a.real() * b.real() - a.imag() * b.imag(), a.real() * b.imag() + a.imag() * b.real());
-}
 
 }  // namespace
 
@@ -144,11 +137,15 @@ bool apply_tuning(DecoderTuning& t, const std::string& spec) {
             t.osd_min_sync = float(v);
         else if (key == "osd_low_hard")
             t.osd_low_hard = int(v);
+        else if (key == "osd_max_total")
+            t.osd_max_total = int(v);
         else
             return false;
     }
     return true;
 }
+
+const char* mode_name(Mode mode) { return mode == Mode::Ft4 ? "ft4" : "ft8"; }
 
 const char* Decode::quality() const {
     if (low_confidence)
@@ -211,61 +208,6 @@ void compute_spectrogram(const std::vector<cf>& x, double min_hz, double max_hz,
             const int k = (bin_lo + b) & (kSpecFft - 1);
             row[b] = std::norm(buf[size_t(k)]);
         }
-    }
-}
-
-// Noise power per sample (sigma^2 of the complex baseband) as a function of
-// frequency, from Hann-windowed spectra of one symbol every half symbol: the
-// rectangular windows of the sync spectrogram leak a strong signal's power
-// far into its neighbourhood, a Hann window does not. Per 6.25 Hz bin the
-// lower quartile over time, scaled to the mean of an exponential
-// distribution (its lower quartile is -ln(0.75) = 0.2877 of the mean), is
-// noise where signals come and go; a transmission fills its own bins all the
-// time, so the value used is the lower quartile of those over +-150 Hz,
-// mostly bins between signals.
-void estimate_noise(const std::vector<cf>& x, int first_sample, int last_sample, double min_hz, double max_hz,
-                    std::vector<float>& noise, int& noise_bin_lo, std::vector<cf>& buf) {
-    const int n = kFrameLen;
-    const Fft& fft = fft_plan(size_t(n));
-    const double bin_hz = kInternalRate / n;
-    noise_bin_lo = int(std::floor(min_hz / bin_hz)) - 30;
-    const int bin_hi = int(std::ceil((max_hz + 50.0) / bin_hz)) + 30;
-    const int nb = bin_hi - noise_bin_lo;
-    static const std::vector<float> hann = [] {
-        std::vector<float> h(kFrameLen);
-        for (int i = 0; i < kFrameLen; ++i)
-            h[size_t(i)] = float(0.5 - 0.5 * std::cos(2.0 * M_PI * (i + 0.5) / kFrameLen));
-        return h;
-    }();
-    std::vector<std::vector<float>> cols{size_t(nb)};
-    buf.resize(size_t(n));
-    for (int start = first_sample; start + n <= last_sample; start += n / 2) {
-        for (int i = 0; i < n; ++i)
-            buf[size_t(i)] = x[size_t(start + i)] * hann[size_t(i)];
-        fft.forward(buf.data());
-        for (int b = 0; b < nb; ++b)
-            cols[size_t(b)].push_back(std::norm(buf[size_t((noise_bin_lo + b) & (n - 1))]));
-    }
-    std::vector<float> raw(size_t(nb), 0.0f);
-    for (int b = 0; b < nb; ++b) {
-        auto& col = cols[size_t(b)];
-        if (col.empty())
-            continue;
-        const size_t q = col.size() / 4;
-        std::nth_element(col.begin(), col.begin() + long(q), col.end());
-        // sum of the Hann window squared is 0.375 n
-        raw[size_t(b)] = col[q] / 0.2877f / (0.375f * float(n));
-    }
-    noise.assign(size_t(nb), 0.0f);
-    const int half = 24;
-    std::vector<float> win;
-    for (int b = 0; b < nb; ++b) {
-        win.clear();
-        for (int j = std::max(0, b - half); j <= std::min(nb - 1, b + half); ++j)
-            win.push_back(raw[size_t(j)]);
-        const size_t q = win.size() / 4;
-        std::nth_element(win.begin(), win.begin() + long(q), win.end());
-        noise[size_t(b)] = win[q];
     }
 }
 
@@ -468,46 +410,6 @@ void relative_llrs(const cf (*c)[kToneCount], Llrs& llr) {
     }
 }
 
-// Unit root-mean-square: min-sum and OSD do not depend on the scale, this
-// only keeps the numbers in a comfortable range.
-void normalise(Llrs& llr) {
-    double s2 = 0;
-    for (float v : llr)
-        s2 += double(v) * v;
-    const double rms = std::sqrt(s2 / kLdpcN);
-    const float k = rms > 0 ? float(1.0 / rms) : 0.0f;
-    for (float& v : llr)
-        v *= k;
-}
-
-// Moving average of length len, centred, applied twice (a triangle).
-void smooth(std::vector<cf>& v, int len) {
-    std::vector<cf> tmp(v.size());
-    for (int pass = 0; pass < 2; ++pass) {
-        const std::vector<cf>& in = pass == 0 ? v : tmp;
-        std::vector<cf>& out = pass == 0 ? tmp : v;
-        const int n = int(in.size());
-        const int h = len / 2;
-        std::complex<double> acc = 0;
-        int count = 0;
-        // Window [i - h, i + h), clipped at the ends.
-        int lo = 0, hi = 0;
-        for (int i = 0; i < n; ++i) {
-            while (hi < std::min(n, i + h)) {
-                acc += std::complex<double>(in[size_t(hi)]);
-                ++hi;
-                ++count;
-            }
-            while (lo < i - h) {
-                acc -= std::complex<double>(in[size_t(lo)]);
-                ++lo;
-                --count;
-            }
-            out[size_t(i)] = count ? cf(acc / double(count)) : cf(0, 0);
-        }
-    }
-}
-
 }  // namespace
 
 std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, size_t valid_end, double offset_hz,
@@ -533,9 +435,10 @@ std::vector<Decode> SlotDecoder::decode(std::vector<cf>& x, size_t valid_begin, 
     for (int pass = 1; pass <= tu.passes; ++pass) {
         w.stats.passes = pass;
         compute_spectrogram(x, settings.min_hz, settings.max_hz, w.power, w.bin_lo, w.nbins, w.fft_buf);
+        // Noise from one-symbol windows: 6.25 Hz bins, kept over +-150 Hz.
         if (pass == 1)
-            estimate_noise(x, int(valid_begin), int(valid_end), settings.min_hz, settings.max_hz, w.noise,
-                           w.noise_bin_lo, w.fft_buf);
+            estimate_noise(x, int(valid_begin), int(valid_end), kInternalRate, kFrameLen, 24, settings.min_hz,
+                           settings.max_hz, 50.0, w.noise, w.noise_bin_lo, w.fft_buf);
         const std::vector<Candidate> cands = find_candidates(w, tu, settings.min_hz, settings.max_hz);
         w.stats.candidates += int(cands.size());
         std::copy(x.begin(), x.end(), w.slot.begin());

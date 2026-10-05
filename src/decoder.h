@@ -1,10 +1,12 @@
 // Fern-FT8, an FT8 decoder module for FernSDR.
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Decoding one 15 s slot of one channel. The input is complex baseband at
-// 6400 samples a second (1024 per symbol) from 1.5 s before the slot starts
-// to 16.5 s after, so that transmissions started early or late are whole.
-// docs/DESIGN.md describes the pipeline and why it is built this way.
+// Decoding one slot of one channel. For FT8 the input is complex baseband at
+// 6400 samples a second (1024 per symbol) from 1.5 s before the 15 s slot
+// starts to 16.5 s after, so that transmissions started early or late are
+// whole; for FT4 (ft4::SlotDecoder) at 16000/3 samples a second (256 per
+// symbol) from 0.75 s before the 7.5 s slot to 6.75 s after. docs/DESIGN.md
+// describes the pipeline and why it is built this way.
 #pragma once
 
 #include <complex>
@@ -14,6 +16,7 @@
 #include <vector>
 
 #include "callsign_hash.h"
+#include "ft4.h"
 #include "message.h"
 #include "protocol.h"
 
@@ -26,12 +29,18 @@ constexpr int kSlotSamples = 115200;  // 18 s
 
 enum class DecodeMethod { Bp, Osd };
 
+enum class Mode { Ft8, Ft4 };
+// "ft8" or "ft4", as the decoder contract names modes.
+const char* mode_name(Mode mode);
+
 struct Decode {
+    Mode mode = Mode::Ft8;
     // UTC start of the slot, milliseconds since 1970.
     int64_t slot_start_ms = 0;
     // Audio frequency of tone 0 above the dial, hertz.
     double freq_hz = 0;
-    // Start of the transmission after slot start + 0.5 s, seconds.
+    // Start of the transmission after slot start + 0.5 s, seconds (for FT4
+    // the start of its first ramp symbol).
     double dt = 0;
     // WSJT-X's convention: signal power over noise power in 2500 Hz.
     int snr_db = 0;
@@ -44,7 +53,8 @@ struct Decode {
     int ldpc_iterations = 0;
     // Codeword bits that disagree with the received hard decisions.
     int hard_errors = 0;
-    // Costas tones received as the strongest of their symbol, of 21.
+    // Costas tones received as the strongest of their symbol, of 21 (FT8)
+    // or 16 (FT4).
     int costas_hits = 0;
     // The candidate's Costas power ratio in the spectrogram.
     float sync = 0;
@@ -59,16 +69,17 @@ struct Decode {
     const char* quality() const;
 };
 
-// The decoder's parameters for one depth. tuning_for_depth() gives the
-// defaults; the fields are public so that experiments (fern-ft8 --tune) can
-// vary them.
+// The decoder's parameters for one depth. tuning_for_depth() gives FT8's
+// defaults and ft4::tuning_for_depth() FT4's; the fields are public so that
+// experiments (fern-ft8 --tune) can vary them. Costas counts are of 21
+// tones for FT8 and of 16 for FT4.
 struct DecoderTuning {
     int passes = 3;
     float sync_min = 1.8f;      // candidate threshold, Costas power ratio
     int max_candidates = 150;   // per pass
     int min_costas_hits = 6;    // of 21, before LDPC
-    // Costas tones strongest among the 8 tone bins in the spectrogram, of
-    // 21, before a candidate is looked at closely.
+    // Costas tones strongest among the tone bins in the spectrogram, before
+    // a candidate is looked at closely.
     int spec_min_hits = 6;
     int bp_max_hard = 36;       // hard errors a BP decode may have
     int osd_order = 1;          // 0: no OSD
@@ -81,11 +92,14 @@ struct DecoderTuning {
     int osd_weak_min_costas = 9;
     int osd_weak_max_hard = 24;
     // OSD runs only on candidates whose Costas power ratio reaches this:
-    // on white noise 99 % of candidates stay below 2.82.
+    // on white noise 99 % of FT8 candidates stay below 2.82.
     float osd_min_sync = 2.8f;
     // Above osd_low_hard hard errors or below osd_min_costas hits an OSD
     // decode is low confidence.
     int osd_low_hard = 30;
+    // FT4 only: an OSD codeword is accepted only when its hard errors
+    // against all four soft-bit sets add up to at most this.
+    int osd_max_total = 4 * kLdpcN;
 };
 DecoderTuning tuning_for_depth(int depth);
 // Applies "key=value,key=value" to t; returns false on an unknown key.
@@ -93,7 +107,7 @@ bool apply_tuning(DecoderTuning& t, const std::string& spec);
 
 struct DecodeSettings {
     // 1: fast, BP only; 2: BP and OSD order 1, three passes; 3: more
-    // candidates and OSD order 2.
+    // candidates and OSD order 2 (FT8; FT4's depths are alike).
     int depth = 2;
     // Range of the tone 0 frequency searched, in baseband hertz.
     double min_hz = -1800;
@@ -134,5 +148,36 @@ public:
 private:
     std::unique_ptr<Work> work_;
 };
+
+namespace ft4 {
+
+constexpr double kInternalRate = 16000.0 / 3.0;
+constexpr int kInternalSamplesPerSymbol = 256;
+constexpr double kSlotLeadSeconds = 0.75;
+constexpr int kSlotSamples = 40000;  // 7.5 s
+
+DecoderTuning tuning_for_depth(int depth);
+
+// Decodes one FT4 slot as fern::ft8::SlotDecoder does an FT8 slot.
+class SlotDecoder {
+public:
+    SlotDecoder();
+    ~SlotDecoder();
+    SlotDecoder(const SlotDecoder&) = delete;
+    SlotDecoder& operator=(const SlotDecoder&) = delete;
+
+    // `samples` holds kSlotSamples at kInternalRate, sample 0 at the slot's
+    // start less 0.75 s; otherwise as fern::ft8::SlotDecoder::decode().
+    std::vector<Decode> decode(std::vector<std::complex<float>>& samples, size_t valid_begin, size_t valid_end,
+                               double offset_hz, int64_t slot_start_ms, const DecodeSettings& settings,
+                               CallsignHashTable* hashes, SlotStats* stats = nullptr);
+
+    struct Work;
+
+private:
+    std::unique_ptr<Work> work_;
+};
+
+}  // namespace ft4
 
 }  // namespace fern::ft8

@@ -29,26 +29,31 @@ namespace {
 
 void usage() {
     std::fprintf(stderr,
-                 "Fern-FT8 %s, an FT8 decoder (receive only).\n"
+                 "Fern-FT8 %s, an FT8 and FT4 decoder (receive only).\n"
                  "\n"
                  "usage:\n"
-                 "  fern-ft8 decode FILE.wav... [--depth 1|2|3] [--rate-test R] [--verbose]\n"
-                 "      Decode 15 s slots of real audio, printed as jt9 prints them:\n"
-                 "      HHMMSS SNR DT FREQ ~ MESSAGE. The audio goes through the same\n"
-                 "      complex baseband path as live channels; --rate-test resamples\n"
-                 "      it to R complex samples a second first. The slot time comes\n"
-                 "      from a YYMMDD_HHMMSS file name, else 000000.\n"
+                 "  fern-ft8 decode FILE.wav... [--mode ft8|ft4] [--depth 1|2|3] [--rate-test R]\n"
+                 "                  [--verbose]\n"
+                 "      Decode 15 s FT8 slots (7.5 s FT4 slots with --mode ft4) of real\n"
+                 "      audio, printed as jt9 prints them: HHMMSS SNR DT FREQ ~ MESSAGE\n"
+                 "      (+ for FT4). The audio goes through the same complex baseband\n"
+                 "      path as live channels; --rate-test resamples it to R complex\n"
+                 "      samples a second first. The slot time comes from a YYMMDD_HHMMSS\n"
+                 "      file name, else 000000.\n"
                  "  fern-ft8 encode \"MESSAGE\" [--mode ft8|ft4] [--freq HZ] [--snr DB] [--dt S]\n"
                  "                  [--rate HZ] [--seed N] -o OUT.wav\n"
                  "      Write a 15 s FT8 slot (7.5 s for FT4) with one transmission of\n"
                  "      MESSAGE (default 1500 Hz, DT 0, 12000 Hz), with white noise at SNR\n"
-                 "      DB in 2500 Hz when --snr is given.\n"
-                 "  fern-ft8 noise [--minutes M] [--depth N] [--seed S] [--rate R] [--silence]\n"
+                 "      DB in 2500 Hz when --snr is given. --tones DIGITS in place of the\n"
+                 "      message sends tones as ft8code or ft4code prints them.\n"
+                 "  fern-ft8 noise [--mode ft8|ft4] [--minutes M] [--depth N] [--seed S] [--rate R]\n"
+                 "                 [--silence]\n"
                  "      Feed M minutes (default 60) of white Gaussian noise, or digital\n"
                  "      silence, through a live channel at R complex samples a second\n"
                  "      (default 8000) and print every decode: each one is false.\n"
-                 "  fern-ft8 bench [--depth N] [FILE.wav...]\n"
-                 "      CPU time per busy and per quiet slot on one thread.\n",
+                 "  fern-ft8 bench [--mode ft8|ft4] [--depth N] [FILE.wav...]\n"
+                 "      CPU time per busy and per quiet slot on one thread, for both\n"
+                 "      modes unless --mode names one.\n",
                  FERN_FT8_VERSION);
 }
 
@@ -84,7 +89,19 @@ bool slot_time_from_name(const std::string& path, int64_t& utc, int& hhmmss) {
     return false;
 }
 
+// "ft8" or "ft4" into mode; false for anything else.
+bool parse_mode(const char* text, Mode& mode) {
+    if (!text)
+        return false;
+    const std::string t = text;
+    if (t != "ft8" && t != "ft4")
+        return false;
+    mode = t == "ft4" ? Mode::Ft4 : Mode::Ft8;
+    return true;
+}
+
 struct Options {
+    Mode mode = Mode::Ft8;
     int depth = 2;
     double rate_test = 0;
     bool verbose = false;
@@ -96,7 +113,7 @@ void apply_tune(ChannelConfig& cfg, const std::string& tune) {
     if (tune.empty())
         return;
     cfg.custom_tuning = true;
-    cfg.tuning = tuning_for_depth(cfg.depth);
+    cfg.tuning = cfg.mode == Mode::Ft4 ? ft4::tuning_for_depth(cfg.depth) : tuning_for_depth(cfg.depth);
     if (!apply_tuning(cfg.tuning, tune))
         throw std::invalid_argument("bad --tune: " + tune);
 }
@@ -117,6 +134,7 @@ std::vector<SlotResult> decode_audio(const Audio& audio, int64_t utc, const Opti
         rate = o.rate_test;
     }
     ChannelConfig cfg;
+    cfg.mode = o.mode;
     cfg.rate = rate;
     cfg.offset_hz = offset;
     cfg.width_hz = 4400;
@@ -146,7 +164,9 @@ void print_decode(const Decode& d, int hhmmss, bool verbose) {
     const int64_t sec_of_day = (d.slot_start_ms / 1000) % 86400;
     const int hms = hhmmss >= 0 ? hhmmss
                                 : int(sec_of_day / 3600 * 10000 + sec_of_day % 3600 / 60 * 100 + sec_of_day % 60);
-    std::printf("%06d %3d %4.1f %4d ~  %s", hms, d.snr_db, std::fabs(d.dt) < 0.05 ? 0.0 : d.dt, int(std::lround(d.freq_hz)), d.message.text.c_str());
+    // jt9 marks FT8 decodes with ~ and FT4 decodes with +.
+    std::printf("%06d %3d %4.1f %4d %c  %s", hms, d.snr_db, std::fabs(d.dt) < 0.05 ? 0.0 : d.dt,
+                int(std::lround(d.freq_hz)), d.mode == Mode::Ft4 ? '+' : '~', d.message.text.c_str());
     if (verbose)
         std::printf("   [%d.%d %s pass %d span %d it %d hard %d costas %d sync %.2f]", d.message.i3, d.message.n3,
                     d.quality(), d.pass, d.llr_span, d.ldpc_iterations, d.hard_errors, d.costas_hits, d.sync);
@@ -160,6 +180,8 @@ int cmd_decode(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--depth" && i + 1 < argc)
             o.depth = std::atoi(argv[++i]);
+        else if (a == "--mode" && i + 1 < argc && parse_mode(argv[i + 1], o.mode))
+            ++i;
         else if (a == "--rate-test" && i + 1 < argc)
             o.rate_test = std::atof(argv[++i]);
         else if (a == "--verbose")
@@ -200,9 +222,27 @@ int cmd_decode(int argc, char** argv) {
     return 0;
 }
 
+// Tones as WSJT-X's ft8code and ft4code print them, digits with or without
+// spaces: FT8's 79, or FT4's 103 with or without the ramp symbol (0) at each
+// end. False when they are not that.
+bool parse_tones(const std::string& text, Mode mode, std::vector<uint8_t>& tones) {
+    tones.clear();
+    for (char ch : text) {
+        if (ch == ' ')
+            continue;
+        if (ch < '0' || ch > (mode == Mode::Ft4 ? '3' : '7'))
+            return false;
+        tones.push_back(uint8_t(ch - '0'));
+    }
+    if (mode == Mode::Ft4 && tones.size() == size_t(ft4::kWaveSymbolCount) && tones.front() == 0 &&
+        tones.back() == 0)
+        tones = std::vector<uint8_t>(tones.begin() + 1, tones.end() - 1);
+    return tones.size() == size_t(mode == Mode::Ft4 ? ft4::kSymbolCount : kSymbolCount);
+}
+
 int cmd_encode(int argc, char** argv) {
-    std::string text, out;
-    bool ft4 = false;
+    std::string text, out, tone_text;
+    Mode mode = Mode::Ft8;
     double freq = 1500, dt = 0, rate = 12000;
     double snr = std::nan("");
     unsigned seed = 1;
@@ -222,8 +262,10 @@ int cmd_encode(int argc, char** argv) {
             seed = unsigned(std::strtoul(v, nullptr, 10));
         else if (a == "-o" && (v = next()))
             out = v;
-        else if (a == "--mode" && (v = next()) && (std::string(v) == "ft8" || std::string(v) == "ft4"))
-            ft4 = std::string(v) == "ft4";
+        else if (a == "--mode" && (v = next()) && parse_mode(v, mode))
+            ;
+        else if (a == "--tones" && (v = next()))
+            tone_text = v;
         else if (text.empty() && !a.empty() && a[0] != '-')
             text = a;
         else {
@@ -231,14 +273,31 @@ int cmd_encode(int argc, char** argv) {
             return 2;
         }
     }
-    if (text.empty() || out.empty() || rate < 2 * (freq + (ft4 ? 100 : 60)) || freq < 0) {
+    const bool ft4 = mode == Mode::Ft4;
+    if (text.empty() == tone_text.empty() || out.empty() || rate < 2 * (freq + (ft4 ? 100 : 60)) || freq < 0) {
         usage();
         return 2;
     }
-    const auto payload = pack_message(text);
-    if (!payload) {
-        std::fprintf(stderr, "fern-ft8: no FT8 message type carries \"%s\"\n", text.c_str());
-        return 1;
+    std::vector<uint8_t> tones;
+    if (!tone_text.empty()) {
+        if (!parse_tones(tone_text, mode, tones)) {
+            std::fprintf(stderr, "fern-ft8: --tones wants the %s tones as ft%ccode prints them\n",
+                         ft4 ? "103 (or 105)" : "79", ft4 ? '4' : '8');
+            return 2;
+        }
+    } else {
+        const auto payload = pack_message(text);
+        if (!payload) {
+            std::fprintf(stderr, "fern-ft8: no FT8 message type carries \"%s\"\n", text.c_str());
+            return 1;
+        }
+        if (ft4) {
+            const ft4::Tones t = ft4::tones_of(ft4::encode_codeword(*payload));
+            tones.assign(t.begin(), t.end());
+        } else {
+            const Tones t = tones_of(encode_codeword(*payload));
+            tones.assign(t.begin(), t.end());
+        }
     }
     Audio audio;
     audio.rate = rate;
@@ -251,11 +310,15 @@ int cmd_encode(int argc, char** argv) {
     double amp = 0.3;
     if (!std::isnan(snr))
         amp = std::sqrt(std::pow(10.0, snr / 10.0) * 4.0 * 2500.0 * sigma * sigma / rate);
-    if (ft4)
-        add_ft4_waveform(ft4::tones_of(ft4::encode_codeword(*payload)), rate, freq, ft4::kStartSeconds + dt, 1.0f,
-                         wave.data(), n);
-    else
-        add_ft8_waveform(tones_of(encode_codeword(*payload)), rate, freq, kStartSeconds + dt, 1.0f, wave.data(), n);
+    if (ft4) {
+        ft4::Tones t{};
+        std::copy(tones.begin(), tones.end(), t.begin());
+        add_ft4_waveform(t, rate, freq, ft4::kStartSeconds + dt, 1.0f, wave.data(), n);
+    } else {
+        Tones t{};
+        std::copy(tones.begin(), tones.end(), t.begin());
+        add_ft8_waveform(t, rate, freq, kStartSeconds + dt, 1.0f, wave.data(), n);
+    }
     std::mt19937 rng(seed);
     std::normal_distribution<double> g(0.0, sigma);
     audio.samples.resize(n);
@@ -266,12 +329,14 @@ int cmd_encode(int argc, char** argv) {
 }
 
 // A busy slot: `signals` transmissions at random frequencies from 200 to
-// 3000 Hz, SNRs from -20 to +10 dB and DT from -0.5 to 1.5 s, in white
-// noise; they overlap as on a busy band.
-Audio synthetic_busy_slot(unsigned seed, int signals) {
+// 3000 Hz, SNRs from -20 to +10 dB and DT from -0.5 to 1.5 s (FT4: SNRs
+// from -16 to +10 dB, DT from -0.5 to 0.8 s), in white noise; they overlap as
+// on a busy band.
+Audio synthetic_busy_slot(unsigned seed, int signals, Mode mode = Mode::Ft8) {
     std::mt19937 rng(seed);
+    const bool ft4 = mode == Mode::Ft4;
     const double rate = 12000, sigma = 0.02;
-    const size_t n = size_t(15 * rate);
+    const size_t n = size_t((ft4 ? ft4::kSlotSeconds : kSlotSeconds) * rate);
     std::vector<std::complex<float>> sum(n);
     auto call = [&]() {
         const char* prefixes[] = {"K", "W", "DL", "JA", "G", "VK", "PY", "EA", "OH", "SP", "HB9", "R"};
@@ -290,11 +355,15 @@ Audio synthetic_busy_slot(unsigned seed, int signals) {
         if (!p)
             continue;
         const double f = 200 + 2800.0 * (rng() % 1000) / 1000.0;
-        const double dt = -0.5 + 2.0 * (rng() % 1000) / 1000.0;
-        const double snr = -20 + 30.0 * (rng() % 1000) / 1000.0;
+        const double dt = -0.5 + (ft4 ? 1.3 : 2.0) * (rng() % 1000) / 1000.0;
+        const double snr = (ft4 ? -16 : -20) + (ft4 ? 26.0 : 30.0) * (rng() % 1000) / 1000.0;
         const double amp = std::sqrt(std::pow(10.0, snr / 10.0) * 4.0 * 2500.0 * sigma * sigma / rate);
         std::vector<std::complex<float>> w(n);
-        add_ft8_waveform(tones_of(encode_codeword(*p)), rate, f, kStartSeconds + dt, float(amp), w.data(), n);
+        if (ft4)
+            add_ft4_waveform(ft4::tones_of(ft4::encode_codeword(*p)), rate, f, ft4::kStartSeconds + dt, float(amp),
+                             w.data(), n);
+        else
+            add_ft8_waveform(tones_of(encode_codeword(*p)), rate, f, kStartSeconds + dt, float(amp), w.data(), n);
         for (size_t i = 0; i < n; ++i)
             sum[i] += w[i];
     }
@@ -322,6 +391,7 @@ std::string isa_description() {
 }
 
 int cmd_noise(int argc, char** argv) {
+    Mode mode = Mode::Ft8;
     double minutes = 60, rate = 8000;
     int depth = 3;
     unsigned seed = 1;
@@ -333,6 +403,8 @@ int cmd_noise(int argc, char** argv) {
         const char* v = nullptr;
         if (a == "--minutes" && (v = next()))
             minutes = std::atof(v);
+        else if (a == "--mode" && (v = next()) && parse_mode(v, mode))
+            ;
         else if (a == "--depth" && (v = next()))
             depth = std::atoi(v);
         else if (a == "--seed" && (v = next()))
@@ -349,6 +421,7 @@ int cmd_noise(int argc, char** argv) {
         }
     }
     ChannelConfig cfg;
+    cfg.mode = mode;
     cfg.rate = rate;
     cfg.depth = depth;
     apply_tune(cfg, tune);
@@ -381,20 +454,24 @@ int cmd_noise(int argc, char** argv) {
         take(ch.decode_ready());
     }
     take(ch.finish());
-    std::printf("%zu slots (%.1f minutes) of %s at depth %d: %zu decodes, %.3f s CPU per slot\n", slots,
-                double(slots) / 4.0, silence ? "silence" : "white noise", depth, decodes,
-                slots ? cpu / double(slots) : 0.0);
+    std::printf("%zu %s slots (%.1f minutes) of %s at depth %d: %zu decodes, %.3f s CPU per slot\n", slots,
+                mode == Mode::Ft4 ? "FT4" : "FT8", double(slots) / (mode == Mode::Ft4 ? 8.0 : 4.0),
+                silence ? "silence" : "white noise", depth, decodes, slots ? cpu / double(slots) : 0.0);
     return decodes == 0 ? 0 : 3;
 }
 
 int cmd_bench(int argc, char** argv) {
     int depth = 0;
+    bool only = false;
+    Mode only_mode = Mode::Ft8;
     std::string tune;
     std::vector<std::string> files;
     for (int i = 0; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--depth" && i + 1 < argc)
             depth = std::atoi(argv[++i]);
+        else if (a == "--mode" && i + 1 < argc && parse_mode(argv[i + 1], only_mode))
+            only = ++i > 0;
         else if (a == "--tune" && i + 1 < argc)
             tune = argv[++i];
         else
@@ -404,20 +481,28 @@ int cmd_bench(int argc, char** argv) {
     std::vector<int> depths = depth ? std::vector<int>{depth} : std::vector<int>{1, 2, 3};
     struct Case {
         std::string name;
+        Mode mode;
         Audio audio;
     };
     std::vector<Case> cases;
     if (files.empty()) {
-        cases.push_back({"synthetic busy slot (30 signals)", synthetic_busy_slot(11, 30)});
-        Audio quiet = synthetic_busy_slot(12, 0);
-        cases.push_back({"quiet slot (noise only)", quiet});
+        if (!only || only_mode == Mode::Ft8) {
+            cases.push_back({"FT8 synthetic busy slot (30 signals)", Mode::Ft8, synthetic_busy_slot(11, 30)});
+            cases.push_back({"FT8 quiet slot (noise only)", Mode::Ft8, synthetic_busy_slot(12, 0)});
+        }
+        if (!only || only_mode == Mode::Ft4) {
+            cases.push_back(
+                {"FT4 synthetic busy slot (30 signals)", Mode::Ft4, synthetic_busy_slot(13, 30, Mode::Ft4)});
+            cases.push_back({"FT4 quiet slot (noise only)", Mode::Ft4, synthetic_busy_slot(14, 0, Mode::Ft4)});
+        }
     } else {
         for (const auto& f : files)
-            cases.push_back({f, read_wav(f)});
+            cases.push_back({f, only_mode, read_wav(f)});
     }
     for (int d : depths) {
         for (const Case& c : cases) {
             Options o;
+            o.mode = c.mode;
             o.depth = d;
             o.tune = tune;
             double best = 1e9;
@@ -432,7 +517,7 @@ int cmd_bench(int argc, char** argv) {
                     decodes += s.decodes.size();
                 best = std::min(best, cpu);
             }
-            std::printf("depth %d  %-40s %6.3f s CPU  %3zu decodes\n", d, c.name.c_str(), best, decodes);
+            std::printf("depth %d  %-44s %6.3f s CPU  %3zu decodes\n", d, c.name.c_str(), best, decodes);
         }
     }
     return 0;

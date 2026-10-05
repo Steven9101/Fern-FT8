@@ -5,9 +5,11 @@
 // "Decoders", API 2) delivers it: complex baseband at a rate that need not
 // be whole, centred `offset` hertz above the dial, in frames that carry a
 // running sample index and the UTC time of their first sample. Channel
-// resamples onto a grid of 1/6400 s aligned to UTC, keeps the last minute,
-// and decodes each 15 s slot once it holds 1.5 s before to 16.5 s after the
-// slot's start.
+// resamples onto a grid aligned to UTC, keeps the last minute, and decodes
+// each slot once it holds what the slot decoder takes: for FT8 a grid of
+// 1/6400 s and 15 s slots, decoded with 1.5 s before to 16.5 s after the
+// slot's start; for FT4 a grid of 3/16000 s and 7.5 s slots, decoded with
+// 0.75 s before to 6.75 s after.
 //
 // A Channel is used by one thread at a time; different channels may decode
 // on different threads at once. The callsign hash table may be shared by
@@ -30,12 +32,14 @@ constexpr uint32_t kFrameSamplesLost = 1;
 constexpr uint32_t kFrameClockSet = 2;
 
 struct ChannelConfig {
+    Mode mode = Mode::Ft8;
     double rate = 0;          // complex samples a second
     double offset_hz = 2000;  // audio frequency of baseband 0 Hz
     double width_hz = 4000;   // the channel covers offset +- width / 2
     int depth = 2;
     // Tone 0 frequencies searched, audio hertz above the dial. Zero means
-    // the channel's own edges, less the 50 Hz a signal occupies.
+    // the channel's own edges, less what a signal occupies above tone 0
+    // (50 Hz for FT8, 75 Hz for FT4).
     double min_freq_hz = 0;
     double max_freq_hz = 0;
     UnpackOptions unpack;
@@ -74,16 +78,36 @@ public:
 
     const ChannelConfig& config() const { return config_; }
 
+    // The grid and slots of a mode, in grid samples.
+    struct Timing {
+        double rate;          // grid samples a second
+        double us_per_grid;   // exact in binary
+        int64_t per_slot;
+        int64_t lead;         // before the slot's start, decoded with it
+        int64_t slot_samples; // what the slot decoder takes
+        int64_t ring;         // grid samples kept, about a minute
+        // A stream's first slot is the first that starts at most this long
+        // before the stream does; at its end a slot is decoded when this
+        // much of it has arrived.
+        int64_t earliest;
+        int64_t finish_min;
+        int64_t slot_ms;
+        double signal_hz;     // occupied above tone 0
+    };
+
 private:
     void anchor(uint64_t index, int64_t utc_us);
     void produce();
     SlotResult decode_slot(int64_t slot);
+    size_t ring_pos(int64_t g) const;
 
     ChannelConfig config_;
+    const Timing& timing_;
     CallsignHashTable* hashes_;
     DecodeSettings settings_;
     Interpolator interp_;
-    SlotDecoder decoder_;
+    std::unique_ptr<SlotDecoder> ft8_decoder_;
+    std::unique_ptr<ft4::SlotDecoder> ft4_decoder_;
 
     // Input samples from hist_start_ on, by running index.
     std::vector<std::complex<float>> hist_;
@@ -93,12 +117,12 @@ private:
     uint64_t anchor_index_ = 0;
     int64_t anchor_utc_us_ = 0;
 
-    // Output on the UTC grid: sample g is at g / 6400 s after 1970.
+    // Output on the UTC grid: sample g is at g / timing_.rate s after 1970.
     std::vector<std::complex<float>> ring_;
     std::vector<uint8_t> have_;
     int64_t next_g_ = 0;     // next grid sample to produce
     int64_t written_ = -1;   // grid samples up to here have been handled
-    int64_t next_slot_ = 0;  // index of the next slot to decode (slot k starts at 15 k s)
+    int64_t next_slot_ = 0;  // index of the next slot to decode (slot k starts at 15 k s, or 7.5 k s)
     bool slot_known_ = false;
     std::vector<std::complex<float>> slot_buf_;
 };
