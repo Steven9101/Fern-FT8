@@ -38,11 +38,11 @@ void usage() {
                  "      complex baseband path as live channels; --rate-test resamples\n"
                  "      it to R complex samples a second first. The slot time comes\n"
                  "      from a YYMMDD_HHMMSS file name, else 000000.\n"
-                 "  fern-ft8 encode \"MESSAGE\" [--freq HZ] [--snr DB] [--dt S] [--rate HZ]\n"
-                 "                  [--seed N] -o OUT.wav\n"
-                 "      Write a 15 s slot with one transmission of MESSAGE (default\n"
-                 "      1500 Hz, DT 0, 12000 Hz), with white noise at SNR DB in 2500 Hz\n"
-                 "      when --snr is given.\n"
+                 "  fern-ft8 encode \"MESSAGE\" [--mode ft8|ft4] [--freq HZ] [--snr DB] [--dt S]\n"
+                 "                  [--rate HZ] [--seed N] -o OUT.wav\n"
+                 "      Write a 15 s FT8 slot (7.5 s for FT4) with one transmission of\n"
+                 "      MESSAGE (default 1500 Hz, DT 0, 12000 Hz), with white noise at SNR\n"
+                 "      DB in 2500 Hz when --snr is given.\n"
                  "  fern-ft8 noise [--minutes M] [--depth N] [--seed S] [--rate R] [--silence]\n"
                  "      Feed M minutes (default 60) of white Gaussian noise, or digital\n"
                  "      silence, through a live channel at R complex samples a second\n"
@@ -202,6 +202,7 @@ int cmd_decode(int argc, char** argv) {
 
 int cmd_encode(int argc, char** argv) {
     std::string text, out;
+    bool ft4 = false;
     double freq = 1500, dt = 0, rate = 12000;
     double snr = std::nan("");
     unsigned seed = 1;
@@ -221,6 +222,8 @@ int cmd_encode(int argc, char** argv) {
             seed = unsigned(std::strtoul(v, nullptr, 10));
         else if (a == "-o" && (v = next()))
             out = v;
+        else if (a == "--mode" && (v = next()) && (std::string(v) == "ft8" || std::string(v) == "ft4"))
+            ft4 = std::string(v) == "ft4";
         else if (text.empty() && !a.empty() && a[0] != '-')
             text = a;
         else {
@@ -228,7 +231,7 @@ int cmd_encode(int argc, char** argv) {
             return 2;
         }
     }
-    if (text.empty() || out.empty() || rate < 2 * (freq + 60) || freq < 0) {
+    if (text.empty() || out.empty() || rate < 2 * (freq + (ft4 ? 100 : 60)) || freq < 0) {
         usage();
         return 2;
     }
@@ -237,10 +240,9 @@ int cmd_encode(int argc, char** argv) {
         std::fprintf(stderr, "fern-ft8: no FT8 message type carries \"%s\"\n", text.c_str());
         return 1;
     }
-    const Tones tones = tones_of(encode_codeword(*payload));
     Audio audio;
     audio.rate = rate;
-    const size_t n = size_t(std::llround(15.0 * rate));
+    const size_t n = size_t(std::llround((ft4 ? ft4::kSlotSeconds : kSlotSeconds) * rate));
     std::vector<std::complex<float>> wave(n);
     // Real noise of standard deviation sigma has one-sided density
     // 2 sigma^2 / rate; a sine of amplitude A has power A^2 / 2, so
@@ -249,7 +251,11 @@ int cmd_encode(int argc, char** argv) {
     double amp = 0.3;
     if (!std::isnan(snr))
         amp = std::sqrt(std::pow(10.0, snr / 10.0) * 4.0 * 2500.0 * sigma * sigma / rate);
-    add_ft8_waveform(tones, rate, freq, kStartSeconds + dt, 1.0f, wave.data(), n);
+    if (ft4)
+        add_ft4_waveform(ft4::tones_of(ft4::encode_codeword(*payload)), rate, freq, ft4::kStartSeconds + dt, 1.0f,
+                         wave.data(), n);
+    else
+        add_ft8_waveform(tones_of(encode_codeword(*payload)), rate, freq, kStartSeconds + dt, 1.0f, wave.data(), n);
     std::mt19937 rng(seed);
     std::normal_distribution<double> g(0.0, sigma);
     audio.samples.resize(n);

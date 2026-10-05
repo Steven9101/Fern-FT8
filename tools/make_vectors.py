@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # Fern-FT8, an FT8 decoder module for FernSDR.
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Record reference vectors from WSJT-X's ft8code for tests/vectors/ft8code.txt.
+"""Record reference vectors from WSJT-X's ft8code for tests/vectors/ft8code.txt,
+or with --ft4 from its ft4code for tests/vectors/ft4code.txt.
 
 Each line: message|text ft8code decodes|i3.n3|77 payload bits|14 CRC bits|
-83 parity bits|79 tones. Only the program's output is recorded; the tests
-compare Fern-FT8's own encoder and decoder with it. Needs ft8code on PATH
-(the Debian/Ubuntu wsjtx package); the vectors in the repository came from
-WSJT-X 2.7.0-rc3.
+83 parity bits|79 tones. With --ft4: message|text ft4code decodes|i3.n3|
+77 payload bits|the 77 bits after scrambling|14 CRC bits|83 parity bits|
+105 tones (with the two ramp symbols). Only the program's output is
+recorded; the tests compare Fern-FT8's own encoder and decoder with it.
+Needs ft8code and ft4code on PATH (the Debian/Ubuntu wsjtx package); the
+vectors in the repository came from WSJT-X 2.7.0-rc3.
 """
 import subprocess
 import sys
@@ -23,8 +26,8 @@ EXTRA = [
 ]
 
 
-def tests_messages():
-    out = subprocess.run(["ft8code", "-T"], capture_output=True, text=True).stdout.splitlines()
+def tests_messages(program, flag):
+    out = subprocess.run([program, flag], capture_output=True, text=True).stdout.splitlines()
     msgs = []
     for ln in out:
         if len(ln) > 4 and ln[:3].strip().rstrip(".").isdigit():
@@ -54,9 +57,29 @@ def vector(msg):
     return "|".join([msg, decoded, itype, bits, crc, parity, tones])
 
 
+def vector_ft4(msg):
+    out = subprocess.run(["ft4code", msg], capture_output=True, text=True).stdout.splitlines()
+    head = out[2]
+    decoded = head[42:79].strip()
+    itype = [t for t in head[80:].split() if t != "*"][0]
+    found = {}
+    for i, ln in enumerate(out):
+        for key in ("Source-encoded message before", "Source-encoded message after", "14-bit CRC", "83 Parity"):
+            if ln.startswith(key):
+                found[key] = out[i + 1].strip()
+        if ln.startswith("Channel symbols"):
+            found["tones"] = "".join(out[i + 2].split())
+    if itype.endswith("."):
+        itype += "0"
+    return "|".join([msg, decoded, itype, found["Source-encoded message before"],
+                     found["Source-encoded message after"], found["14-bit CRC"], found["83 Parity"], found["tones"]])
+
+
 def main():
-    msgs = tests_messages() + EXTRA
-    lines = [vector(m) for m in msgs]
+    if sys.argv[1:] == ["--ft4"]:
+        lines = [vector_ft4(m) for m in tests_messages("ft4code", "-t") + EXTRA]
+    else:
+        lines = [vector(m) for m in tests_messages("ft8code", "-T") + EXTRA]
     sys.stdout.write("\n".join(lines) + "\n")
 
 

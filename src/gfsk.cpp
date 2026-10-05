@@ -11,44 +11,77 @@ namespace fern::ft8 {
 
 namespace {
 
-constexpr double kBT = 2.0;
 // The pulse is negligible beyond 1.5 symbols from its centre: at u = 1 the
-// nearer erf argument is already 5.3 * 2 * 0.5 = 5.3.
+// nearer erf argument is already 5.3 * BT * 0.5, 5.3 for FT8 and 2.7 for
+// FT4 (whose pulse there is below 1e-4, and below 1e-13 at u = 1.5).
 constexpr int kTableSteps = 4096;  // per symbol
+using PulseTable = std::array<double, 3 * kTableSteps + 2>;
 
-const std::array<double, 3 * kTableSteps + 2>& pulse_table() {
-    static const auto table = [] {
-        std::array<double, 3 * kTableSteps + 2> t{};
-        for (size_t i = 0; i < t.size(); ++i)
-            t[i] = gfsk_pulse(-1.5 + double(i) / kTableSteps);
-        return t;
-    }();
-    return table;
+PulseTable make_pulse_table(double bt) {
+    PulseTable t{};
+    for (size_t i = 0; i < t.size(); ++i)
+        t[i] = gfsk_pulse(-1.5 + double(i) / kTableSteps, bt);
+    return t;
 }
 
-double pulse_lookup(double u) {
+double pulse_lookup(const PulseTable& t, double u) {
     const double x = (u + 1.5) * kTableSteps;
     if (x <= 0.0 || x >= 3.0 * kTableSteps)
         return 0.0;
     const size_t i = size_t(x);
     const double f = x - double(i);
-    const auto& t = pulse_table();
     return t[i] + f * (t[i + 1] - t[i]);
 }
 
+// What tells one mode's waveform from the other's.
+struct Shape {
+    const uint8_t* tones;
+    int count;
+    double symbol_seconds;
+    double spacing_hz;
+    // Raised-cosine ramps over this long at the start and the end.
+    double ramp_seconds;
+    const PulseTable& pulses;
+};
+
+void add_waveform(const Shape& shape, double rate, double f0, double start, float amplitude,
+                  std::complex<float>* out, size_t n);
+
 }  // namespace
 
-double gfsk_pulse(double u) {
+double gfsk_pulse(double u, double bt) {
     const double k = M_PI * std::sqrt(2.0 / std::log(2.0));
-    return 0.5 * (std::erf(k * kBT * (u + 0.5)) - std::erf(k * kBT * (u - 0.5)));
+    return 0.5 * (std::erf(k * bt * (u + 0.5)) - std::erf(k * bt * (u - 0.5)));
 }
 
 void add_ft8_waveform(const Tones& tones, double rate, double f0, double start, float amplitude,
                       std::complex<float>* out, size_t n) {
-    const double T = kSymbolSeconds;
-    const double duration = kSymbolCount * T;
+    static const PulseTable pulses = make_pulse_table(kFt8BT);
+    add_waveform({tones.data(), kSymbolCount, kSymbolSeconds, kToneSpacingHz, kSymbolSeconds / 8.0, pulses}, rate,
+                 f0, start, amplitude, out, n);
+}
+
+void add_ft4_waveform(const ft4::Tones& tones, double rate, double f0, double start, float amplitude,
+                      std::complex<float>* out, size_t n) {
+    static const PulseTable pulses = make_pulse_table(kFt4BT);
+    const ft4::WaveTones wave = ft4::wave_tones(tones);
+    // [QEX] section 5: the ramps take the whole of the two ramp symbols.
+    add_waveform({wave.data(), ft4::kWaveSymbolCount, ft4::kSymbolSeconds, ft4::kToneSpacingHz,
+                  ft4::kSymbolSeconds, pulses},
+                 rate, f0, start, amplitude, out, n);
+}
+
+namespace {
+
+void add_waveform(const Shape& shape, double rate, double f0, double start, float amplitude,
+                  std::complex<float>* out, size_t n) {
+    const uint8_t* tones = shape.tones;
+    const int count = shape.count;
+    const PulseTable& pulses = shape.pulses;
+    const double T = shape.symbol_seconds;
+    const double duration = count * T;
     const double dt = 1.0 / rate;
-    const double ramp = T / 8.0;
+    const double ramp = shape.ramp_seconds;
     // Frequency deviation in tones at time tau from the start. The tone
     // before the first and after the last is taken to continue, so that the
     // edges are steady under the ramps; pulses two or more symbols away
@@ -58,9 +91,9 @@ void add_ft8_waveform(const Tones& tones, double rate, double f0, double start, 
         const double fl = std::floor(x);
         const int m = int(fl);
         const double u = x - fl;
-        auto tone = [&](int s) { return double(tones[size_t(s < 0 ? 0 : s >= kSymbolCount ? kSymbolCount - 1 : s)]); };
-        return tone(m - 1) * pulse_lookup(u + 0.5) + tone(m) * pulse_lookup(u - 0.5) +
-               tone(m + 1) * pulse_lookup(u - 1.5);
+        auto tone = [&](int s) { return double(tones[size_t(s < 0 ? 0 : s >= count ? count - 1 : s)]); };
+        return tone(m - 1) * pulse_lookup(pulses, u + 0.5) + tone(m) * pulse_lookup(pulses, u - 0.5) +
+               tone(m + 1) * pulse_lookup(pulses, u - 1.5);
     };
     const double first = std::ceil(start * rate);
     const size_t i0 = first < 0.0 ? 0 : size_t(first);
@@ -70,10 +103,10 @@ void add_ft8_waveform(const Tones& tones, double rate, double f0, double start, 
     // Phase at the first sample, integrated from the start by the midpoint
     // rule; then the phasor turns sample by sample. Its step is the carrier
     // f0, the same for every sample, times the deviation's small turn,
-    // below 2 pi 43.75 Hz / rate, whose sine and cosine a few terms of
-    // their series give to 1e-9.
+    // below 2 pi 62.5 Hz / rate (FT4's tone 3), whose sine and cosine a few
+    // terms of their series give to 1e-9.
     // When a symbol is a whole number of samples (1024 at 6400 Hz, 1920 at
-    // 12000 Hz), the midpoint of sample i lies at the same place within its
+    // 12000 Hz; for FT4 256 at 16000/3 Hz, 576 at 12000 Hz), the midpoint of sample i lies at the same place within its
     // symbol as that of sample i + sps, so the three pulses that shape a
     // symbol are tabulated once for that symbol's samples.
     const double sps_real = rate * T;
@@ -98,16 +131,16 @@ void add_ft8_waveform(const Tones& tones, double rate, double f0, double start, 
             next[size_t(r)] = u >= 1.0;
             if (u >= 1.0)
                 u -= 1.0;
-            pa[size_t(r)] = pulse_lookup(u + 0.5);
-            pb[size_t(r)] = pulse_lookup(u - 0.5);
-            pc[size_t(r)] = pulse_lookup(u - 1.5);
+            pa[size_t(r)] = pulse_lookup(pulses, u + 0.5);
+            pb[size_t(r)] = pulse_lookup(pulses, u - 0.5);
+            pc[size_t(r)] = pulse_lookup(pulses, u - 1.5);
         }
     }
-    auto tone_at = [&](long s) { return double(tones[size_t(s < 0 ? 0 : s >= kSymbolCount ? kSymbolCount - 1 : s)]); };
-    const double phase0 = 2.0 * M_PI * (f0 + kToneSpacingHz * deviation(0.5 * tau0)) * tau0;
+    auto tone_at = [&](long s) { return double(tones[size_t(s < 0 ? 0 : s >= count ? count - 1 : s)]); };
+    const double phase0 = 2.0 * M_PI * (f0 + shape.spacing_hz * deviation(0.5 * tau0)) * tau0;
     std::complex<double> p = std::polar(1.0, phase0);
     const std::complex<double> carrier = std::polar(1.0, 2.0 * M_PI * f0 * dt);
-    const double k = 2.0 * M_PI * kToneSpacingHz * dt;
+    const double k = 2.0 * M_PI * shape.spacing_hz * dt;
     for (size_t i = i0; i < n; ++i) {
         const double tau = double(i) * dt - start;
         if (tau >= duration)
@@ -136,5 +169,7 @@ void add_ft8_waveform(const Tones& tones, double rate, double f0, double start, 
             p /= std::abs(p);
     }
 }
+
+}  // namespace
 
 }  // namespace fern::ft8

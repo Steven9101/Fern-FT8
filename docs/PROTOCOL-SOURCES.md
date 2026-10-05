@@ -34,6 +34,18 @@ gives the download and its SHA-256.
 | callsign hash, 47055833459 modulo 2^64 | `protocol/hashcodes.f90` | `src/callsign_hash.cpp` |
 | ARRL/RAC sections, states and provinces | `protocol/arrl_rac_sections.txt`, `states_provinces.txt` | `src/protocol_tables.cpp` |
 
+FT4 uses the same message, CRC-14 and LDPC code ([QEX] sections 2 and 3);
+what is its own:
+
+| FT4 protocol element | source | where in Fern-FT8 |
+|---|---|---|
+| the 77-bit scrambling vector, XORed with the payload before the CRC and parity are computed and again after decoding | [QEX] Appendix A, the paragraph after the field table | `src/ft4.cpp` |
+| 87 data symbols of 2 bits, Gray map 00, 01, 11, 10 to tones 0 to 3 | [QEX] section 4, Table 3 columns 1 and 3 | `src/ft4.h` |
+| Costas arrays 0,1,3,2; 1,0,2,3; 2,3,1,0; 3,2,0,1 | [QEX] section 4 | `src/ft4.h` |
+| the 105 symbols R S1 A S2 B S3 C S4 R, R a ramp symbol of tone 0, three groups of 29 data symbols | [QEX] section 4 | `src/ft4.h`, `src/ft4.cpp` |
+| 4-GFSK, h = 1, T = 0.048 s (so 20.833 Hz between tones), BT = 1 | [QEX] section 5, Table 4, equation 3 | `src/gfsk.cpp` |
+| raised-cosine ramps over the whole 48 ms of each ramp symbol | [QEX] section 5 | `src/gfsk.cpp` |
+
 Both tables in the last row have changed since 2020. The changes were
 established without reading WSJT-X's code: by packing a message with each
 word using WSJT-X 2.7.0's `ft8code` program and reading the field value from
@@ -59,6 +71,20 @@ outputs, not by using its code:
   both and sends the first).
 - `jt9`'s output line (`HHMMSS SNR DT FREQ ~ MESSAGE`) and its default
   search range, 200 to 4000 Hz.
+- FT4's bits and tones: every element of the FT4 table above also agrees
+  with WSJT-X 2.7.0-rc3's `ft4code` for 81 messages of every type, which
+  prints the payload before and after scrambling, the CRC, the parity bits
+  and the 105 tones: `tests/vectors/ft4code.txt`, recorded by
+  `tools/make_vectors.py --ft4`. `ft4code` prints the same scrambling vector
+  as the paper.
+- What the paper leaves out about FT4's timing. Its T/R sequence of 7.5 s:
+  the paper says only that FT4 is twice as fast as FT8, and WSJT-X runs it
+  on 7.5 s sequences. Where a transmission starts: `fern-ft8 encode --mode
+  ft4` puts the start of the first ramp symbol 0.5 s + DT into the slot,
+  and `jt9 -5` decodes those files with the same DT to 0.1 s and the same
+  frequency (tone 0) to 1 Hz, from DT -1.0 to +0.95 s and from 300 to
+  3950 Hz; it decodes nothing at DT -1.1 or +1.0. Fern-FT8 searches the
+  same DT range.
 - Decoding thresholds and decode counts, measured with `jt9` and `ft8sim`
   as a comparison, not as a source.
 
