@@ -14,7 +14,7 @@
 #
 # Nothing but the C++17 standard library is needed.
 
-VERSION := 0.1.0
+VERSION := 0.2.0
 .DEFAULT_GOAL := all
 
 OPT ?= -O2

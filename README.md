@@ -18,7 +18,7 @@ section with `mode = ft4`). Nothing needs a terminal. The package can also
 be installed by hand:
 
 ```
-fernsdr --install-module ft8-0.1.0-linux-x86_64.fernmod /etc/fernsdr/fernsdr.conf
+fernsdr --install-module ft8-0.2.0-linux-x86_64.fernmod /etc/fernsdr/fernsdr.conf
 ```
 
 Packages exist for x86-64, aarch64 and armhf (ARMv7 with NEON: every
