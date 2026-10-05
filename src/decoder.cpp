@@ -145,8 +145,6 @@ bool apply_tuning(DecoderTuning& t, const std::string& spec) {
     return true;
 }
 
-const char* mode_name(Mode mode) { return mode == Mode::Ft4 ? "ft4" : "ft8"; }
-
 const char* Decode::quality() const {
     if (low_confidence)
         return "low";

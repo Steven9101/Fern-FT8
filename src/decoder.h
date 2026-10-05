@@ -30,8 +30,6 @@ constexpr int kSlotSamples = 115200;  // 18 s
 enum class DecodeMethod { Bp, Osd };
 
 enum class Mode { Ft8, Ft4 };
-// "ft8" or "ft4", as the decoder contract names modes.
-const char* mode_name(Mode mode);
 
 struct Decode {
     Mode mode = Mode::Ft8;
